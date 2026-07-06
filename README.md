@@ -1,80 +1,60 @@
-# Scraper de Anúncios Imobiliários - Brasil
+# Scraper de Anúncios Imobiliários - VivaReal
 
-Scraper multi-portal para coleta de anúncios imobiliários em escala nacional.
+Coleta dados de anúncios imobiliários do VivaReal (~1.6M anúncios ativos) via API interna, com busca por bairro para cobertura máxima.
 
-## Portais Suportados
+## Como funciona
 
-| Portal | Dificuldade | Proteção |
-|--------|-------------|----------|
-| ImovelWeb | Baixa | Leve |
-| LugarCerto | Fácil | Nenhuma |
-| VivaReal | Média | Moderada |
-| ZapImóveis | Média | Moderada |
-| OLX | Alta | Cloudflare forte |
+1. Descobre os bairros de cada capital via API de locations
+2. Para cada bairro, pagina todos os anúncios disponíveis
+3. Salva no banco Turso (SQLite remoto, 5GB grátis)
+4. Roda automaticamente na nuvem via GitHub Actions (a cada 6h)
+5. Progresso salvo entre execuções — continua de onde parou
+
+## Dados coletados
+
+| Categoria | Campos |
+|-----------|--------|
+| Preço | preço, condomínio, IPTU |
+| Características | área construída, área terreno, quartos, suítes, banheiros, vagas, tipo |
+| Localização | rua, bairro, cidade, estado, CEP, latitude, longitude |
+| Temporalidade | data de publicação, data de última atualização |
+| Qualitativo | descrição completa, URLs das fotos |
+
+## Uso local
+
+```bash
+pip install -r requirements.txt
+
+# Um estado com limite
+python main.py --estado SP --limit 100
+
+# Todos os estados sem limite
+python main.py --all-estados
+
+# Resetar progresso
+python main.py --all-estados --reset
+```
 
 ## Estrutura
 
 ```
-scraper-imoveis/
-├── config/
-│   └── settings.py          # Configurações gerais
+├── config/settings.py        # Configurações e constantes
 ├── scrapers/
-│   ├── base.py              # Classe base do scraper
-│   ├── imovelweb.py         # Scraper ImovelWeb
-│   ├── lugarcerto.py        # Scraper LugarCerto
-│   ├── vivareal.py          # Scraper VivaReal
-│   ├── zapimoveis.py        # Scraper ZapImóveis
-│   └── olx.py               # Scraper OLX
-├── parsers/
-│   └── extractor.py         # Extração de dados do HTML/JSON
-├── storage/
-│   └── database.py          # Persistência (PostgreSQL)
+│   ├── base.py               # Classe base (retry, rate limit, paginação)
+│   └── vivareal.py           # Scraper VivaReal (API + busca por bairro)
+├── parsers/extractor.py      # Utilitários de extração de dados
+├── storage/database.py       # Persistência no Turso (HTTP API)
 ├── utils/
-│   ├── proxy_manager.py     # Gerenciamento de proxies rotativos
-│   ├── rate_limiter.py      # Controle de rate limiting
-│   └── sitemap_parser.py    # Parser de sitemaps XML
-├── main.py                  # Entry point
+│   ├── proxy_manager.py      # Rotação de proxies (opcional)
+│   └── rate_limiter.py       # Controle de delays entre requests
+├── main.py                   # Entry point
+├── .github/workflows/        # GitHub Actions (execução automática)
 ├── requirements.txt
-└── README.md
-```
-
-## Instalação
-
-```bash
-pip install -r requirements.txt
+└── .env                      # Credenciais Turso (não commitado)
 ```
 
 ## Configuração
 
-1. Copie `.env.example` para `.env`
-2. Configure a conexão do banco PostgreSQL
-3. (Opcional) Configure proxies rotativos
-
-## Uso
-
-```bash
-# Rodar todos os portais
-python main.py --all
-
-# Rodar portal específico
-python main.py --portal vivareal
-
-# Rodar por estado
-python main.py --portal vivareal --estado SP
-
-# Apenas coletar URLs do sitemap
-python main.py --portal imovelweb --sitemap-only
-```
-
-## Dados Extraídos
-
-- Preço (venda/aluguel)
-- Área (m²)
-- Quartos / Suítes
-- Banheiros
-- Vagas de garagem
-- Endereço (rua, bairro, cidade, estado)
-- Coordenadas (lat/lng)
-- Tipo (apartamento, casa, terreno, etc.)
-- URL do anúncio
-- Data de coleta
+1. Criar banco no [Turso](https://app.turso.tech)
+2. Copiar `.env.example` para `.env` e preencher URL + token
+3. Para GitHub Actions: adicionar `TURSO_DATABASE_URL` e `TURSO_AUTH_TOKEN` nos secrets do repositório
