@@ -1,14 +1,20 @@
 import requests
+import json
+import os
+import time
+import random
 from scrapers.base import BaseScraper
 from parsers.extractor import DataExtractor
 from config.settings import settings
 
 
 class VivaRealScraper(BaseScraper):
-    """Scraper para VivaReal via API interna (JSON)."""
+    """Scraper para VivaReal via API interna - busca por bairro."""
 
     PORTAL_NAME = "vivareal"
     API_URL = "https://glue-api.vivareal.com/v2/listings"
+    LOCATIONS_URL = "https://glue-api.vivareal.com/v2/locations"
+    BAIRROS_CACHE = "bairros_cache.json"
 
     ESTADOS = {
         "SP": "São Paulo", "RJ": "Rio de Janeiro", "MG": "Minas Gerais",
@@ -21,21 +27,96 @@ class VivaRealScraper(BaseScraper):
         "AC": "Acre", "AP": "Amapá", "RR": "Roraima",
     }
 
+    # Capitais de cada estado (busca inicial)
+    CAPITAIS = {
+        "SP": "São Paulo", "RJ": "Rio de Janeiro", "MG": "Belo Horizonte",
+        "PR": "Curitiba", "RS": "Porto Alegre", "SC": "Florianópolis",
+        "BA": "Salvador", "PE": "Recife", "CE": "Fortaleza", "DF": "Brasília",
+        "GO": "Goiânia", "PA": "Belém", "AM": "Manaus", "MA": "São Luís",
+        "ES": "Vitória", "MT": "Cuiabá", "MS": "Campo Grande",
+        "PB": "João Pessoa", "RN": "Natal", "AL": "Maceió",
+        "PI": "Teresina", "SE": "Aracaju", "TO": "Palmas", "RO": "Porto Velho",
+        "AC": "Rio Branco", "AP": "Macapá", "RR": "Boa Vista",
+    }
+
     def _get_api_headers(self):
         return {
-            "User-Agent": settings.USER_AGENTS[0],
+            "User-Agent": random.choice(settings.USER_AGENTS),
             "x-domain": "www.vivareal.com.br",
             "Accept": "application/json",
         }
 
-    def _make_request(self, estado: str, cidade: str, page: int, size: int = 24):
-        """Faz request na API do VivaReal."""
+    def discover_bairros(self, estado: str, cidade: str) -> list[str]:
+        """Descobre bairros de uma cidade via API de locations."""
+        # Verifica cache
+        cache = self._load_bairros_cache()
+        key = f"{estado}_{cidade}"
+        if key in cache:
+            return cache[key]
+
+        print(f"[vivareal] Descobrindo bairros de {cidade}/{estado}...")
+
+        bairros = set()
         estado_nome = self.ESTADOS.get(estado.upper(), estado)
-        cidade_nome = cidade.replace("-", " ").title() if cidade else estado_nome
+
+        # Busca letras A-Z + silabas comuns para pegar mais bairros
+        queries = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ") + [
+            "Vila", "Jardim", "Parque", "Centro", "Santa", "São",
+            "Bela", "Nova", "Alto", "Barra", "Campo", "Cidade",
+        ]
+
+        for query in queries:
+            self.rate_limiter.wait()
+            try:
+                params = {
+                    "q": f"{query} {cidade}",
+                    "addressState": estado_nome,
+                    "size": "50",
+                }
+                r = requests.get(
+                    self.LOCATIONS_URL,
+                    params=params,
+                    headers=self._get_api_headers(),
+                    timeout=15,
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    neighborhoods = data.get("neighborhood", {}).get("result", {}).get("locations", [])
+                    for n in neighborhoods:
+                        addr = n.get("address", {})
+                        name = addr.get("neighborhood")
+                        n_city = addr.get("city", "")
+                        if name and n_city.lower() == cidade.lower():
+                            bairros.add(name)
+            except Exception:
+                continue
+
+        bairros_list = sorted(list(bairros))
+        print(f"[vivareal] {len(bairros_list)} bairros encontrados em {cidade}/{estado}")
+
+        # Salva cache
+        cache[key] = bairros_list
+        self._save_bairros_cache(cache)
+
+        return bairros_list
+
+    def _load_bairros_cache(self) -> dict:
+        if os.path.exists(self.BAIRROS_CACHE):
+            with open(self.BAIRROS_CACHE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return {}
+
+    def _save_bairros_cache(self, cache: dict):
+        with open(self.BAIRROS_CACHE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+
+    def _make_request(self, estado: str, cidade: str, bairro: str, page: int, size: int = 24):
+        """Faz request na API do VivaReal com bairro."""
+        estado_nome = self.ESTADOS.get(estado.upper(), estado)
         params = {
             "addressState": estado_nome,
-            "addressCity": cidade_nome,
-            "addressNeighborhood": "",
+            "addressCity": cidade,
+            "addressNeighborhood": bairro,
             "businessType": "SALE",
             "listingType": "USED",
             "size": str(size),
@@ -49,34 +130,82 @@ class VivaRealScraper(BaseScraper):
             headers=self._get_api_headers(),
             timeout=15,
         )
-        if response.status_code != 200:
-            print(f"\n[vivareal] Status {response.status_code} | URL: {response.url}")
         response.raise_for_status()
         return response.json()
 
     def get_total_pages(self, estado: str, cidade: str) -> int:
-        """Retorna total de páginas via API."""
-        try:
-            data = self._make_request(estado, cidade, page=1, size=24)
-            total = data.get("search", {}).get("totalCount", 0)
-            print(f"[vivareal] Total de anúncios disponíveis: {total}")
-            return (total // 24) + 1
-        except Exception as e:
-            print(f"[vivareal] Erro ao obter total: {e}")
-            return 100
+        """Não usado na abordagem por bairro."""
+        return 0
 
     def collect_listings_page(self, estado: str, cidade: str, page: int) -> list[dict]:
-        """Coleta anúncios de uma página via API."""
-        data = self._make_request(estado, cidade, page, size=24)
-        listings = data.get("search", {}).get("result", {}).get("listings", [])
-        results = []
+        """Não usado na abordagem por bairro."""
+        return []
 
-        for item in listings:
-            parsed = self._parse_listing(item)
-            if parsed:
-                results.append(parsed)
+    def scrape_bairro(self, estado: str, cidade: str, bairro: str, limit_pages: int = 420) -> int:
+        """Scrape todos os anúncios de um bairro. Retorna quantidade salva."""
+        saved = 0
 
-        return results
+        for page in range(1, limit_pages + 1):
+            try:
+                data = self._make_request(estado, cidade, bairro, page)
+                listings = data.get("search", {}).get("result", {}).get("listings", [])
+
+                if not listings:
+                    break  # Sem mais resultados
+
+                for item in listings:
+                    parsed = self._parse_listing(item)
+                    if parsed:
+                        parsed["portal"] = self.PORTAL_NAME
+                        if self.db.save_anuncio(parsed):
+                            saved += 1
+
+            except Exception as e:
+                if "400" in str(e) or "429" in str(e):
+                    break
+                continue
+
+        return saved
+
+    def run(self, estado: str = "SP", cidade: str = "", limit: int = None, start_page: int = 1):
+        """Executa scraping por bairro. Retorna (saved, last_index)."""
+        from tqdm import tqdm
+
+        cidade = cidade or self.CAPITAIS.get(estado.upper(), "")
+
+        print(f"\n{'='*60}")
+        print(f"Scraping VivaReal: {cidade}/{estado} (por bairro)")
+        print(f"{'='*60}\n")
+
+        # Descobre bairros
+        bairros = self.discover_bairros(estado, cidade)
+
+        if not bairros:
+            print(f"[vivareal] Nenhum bairro encontrado para {cidade}/{estado}")
+            return 0, -1
+
+        # start_page aqui é o índice do bairro para continuar
+        start_idx = start_page - 1 if start_page > 0 else 0
+        bairros_restantes = bairros[start_idx:]
+
+        print(f"[vivareal] {len(bairros_restantes)} bairros para processar (de {len(bairros)} total)")
+
+        total_saved = 0
+        last_idx = start_idx
+
+        for i, bairro in enumerate(tqdm(bairros_restantes, desc=f"[{estado}] Bairros")):
+            saved = self.scrape_bairro(estado, cidade, bairro)
+            total_saved += saved
+            last_idx = start_idx + i + 1
+
+            if limit and total_saved >= limit:
+                break
+
+        if last_idx >= len(bairros):
+            last_idx = -1  # concluído
+
+        print(f"\n[vivareal] {cidade}/{estado}: {total_saved} anúncios salvos")
+        return total_saved, last_idx + 1 if last_idx != -1 else -1
 
     def _parse_listing(self, item: dict) -> dict | None:
         """Parse de um anúncio da API."""
@@ -106,7 +235,6 @@ class VivaRealScraper(BaseScraper):
             # URL
             link = listing.get("link", {})
             url = f"https://www.vivareal.com.br{link.get('href', '')}" if link.get("href") else None
-
             if not url:
                 listing_id = listing.get("id", "")
                 url = f"https://www.vivareal.com.br/imovel/{listing_id}"
@@ -140,7 +268,7 @@ class VivaRealScraper(BaseScraper):
                 "data_publicacao": created,
                 "data_ultima_atualizacao": updated,
             }
-        except (KeyError, IndexError, TypeError, ValueError) as e:
+        except (KeyError, IndexError, TypeError, ValueError):
             return None
 
     def _map_tipo(self, unit_type: str) -> str | None:
