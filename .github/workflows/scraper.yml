@@ -1,0 +1,70 @@
+name: Scraper VivaReal
+
+on:
+  # Roda a cada 6 horas automaticamente
+  schedule:
+    - cron: '0 */6 * * *'
+  # Permite rodar manualmente pelo GitHub
+  workflow_dispatch:
+    inputs:
+      estado:
+        description: 'Estado (ex: SP, RJ, MG ou ALL)'
+        required: false
+        default: 'ALL'
+      limit:
+        description: 'Limite de anúncios (vazio = sem limite)'
+        required: false
+        default: ''
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350  # Máximo ~6h
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Baixar progresso salvo
+        uses: actions/cache@v4
+        with:
+          path: progress.json
+          key: scraper-progress-${{ github.run_id }}
+          restore-keys: |
+            scraper-progress-
+
+      - name: Rodar scraper
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+        run: |
+          ESTADO="${{ github.event.inputs.estado || 'ALL' }}"
+          LIMIT="${{ github.event.inputs.limit }}"
+
+          if [ "$ESTADO" = "ALL" ]; then
+            CMD="python main.py --all-estados"
+          else
+            CMD="python main.py --estado $ESTADO"
+          fi
+
+          if [ -n "$LIMIT" ]; then
+            CMD="$CMD --limit $LIMIT"
+          fi
+
+          echo "Executando: $CMD"
+          $CMD
+
+      - name: Salvar progresso
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: progress.json
+          key: scraper-progress-${{ github.run_id }}
