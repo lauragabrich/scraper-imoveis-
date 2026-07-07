@@ -208,7 +208,9 @@ class VivaRealScraper(BaseScraper):
         return total_saved, last_idx + 1 if last_idx != -1 else -1
 
     def _parse_listing(self, item: dict) -> dict | None:
-        """Parse de um anúncio da API."""
+        """Parse de um anúncio da API - extrai TODOS os campos disponíveis."""
+        import json as json_mod
+
         try:
             listing = item.get("listing", {})
             address = listing.get("address", {})
@@ -237,8 +239,8 @@ class VivaRealScraper(BaseScraper):
             link = listing.get("link", {})
             url = f"https://www.vivareal.com.br{link.get('href', '')}" if link.get("href") else None
             if not url:
-                listing_id = listing.get("id", "")
-                url = f"https://www.vivareal.com.br/imovel/{listing_id}"
+                lid = listing.get("id", "")
+                url = f"https://www.vivareal.com.br/imovel/{lid}"
 
             # Coordenadas
             point = address.get("point", {})
@@ -247,9 +249,7 @@ class VivaRealScraper(BaseScraper):
             amenities = listing.get("amenities", [])
             amenities_str = "|".join(amenities) if amenities else None
 
-            # Complex amenities (do condomínio)
-            complex_amenities = listing.get("usageTypes", [])
-            # Tenta pegar de outros campos
+            # Complex amenities
             complex_raw = listing.get("complexAmenities") or listing.get("condominiumAmenities") or []
             complex_str = "|".join(complex_raw) if complex_raw else None
 
@@ -258,11 +258,33 @@ class VivaRealScraper(BaseScraper):
             preco_val = float(preco) if preco else None
             preco_por_m2 = round(preco_val / area_val, 2) if preco_val and area_val and area_val > 0 else None
 
+            # Campos adicionais
+            usage_types = listing.get("usageTypes", [])
+            unit_types = listing.get("unitTypes", [])
+            floors = listing.get("floors", [])
+            unit_floor = listing.get("unitFloor", [])
+
+            # Anunciante
+            advertiser = item.get("account", {}) or item.get("advertiser", {})
+            contact = listing.get("advertiserContact", {})
+
+            # Pricing extra
+            rental_info = price_info.get("rentalInfo", {})
+            warranties = rental_info.get("warranties", [])
+            aluguel_total = price_info.get("rentalTotalPrice") or rental_info.get("monthlyRentalTotalPrice")
+
+            # Stamps
+            stamps_raw = listing.get("stamps", [])
+            stamps_str = "|".join(stamps_raw) if stamps_raw else None
+
+            # Raw JSON completo
+            raw_json = json_mod.dumps(item, ensure_ascii=False)
+
             return {
                 "url": url,
                 "titulo": listing.get("title"),
                 "descricao": listing.get("description"),
-                "tipo": self._map_tipo(listing.get("unitTypes", [None])[0]) if listing.get("unitTypes") else None,
+                "tipo": self._map_tipo(unit_types[0]) if unit_types else None,
                 "finalidade": price_info.get("businessType", "SALE").replace("SALE", "venda").replace("RENTAL", "aluguel"),
                 "preco": preco_val,
                 "preco_condominio": float(price_info.get("monthlyCondoFee")) if price_info.get("monthlyCondoFee") else None,
@@ -287,6 +309,22 @@ class VivaRealScraper(BaseScraper):
                 "amenities": amenities_str,
                 "complex_amenities": complex_str,
                 "preco_por_m2": preco_por_m2,
+                "raw_json": raw_json,
+                "usage_types": "|".join(usage_types) if usage_types else None,
+                "property_sub_type": unit_types[0] if unit_types else None,
+                "andar": int(floors[0]) if floors else None,
+                "total_andares": int(unit_floor[0]) if unit_floor else None,
+                "aceita_permuta": str(listing.get("acceptExchange")) if listing.get("acceptExchange") is not None else None,
+                "status_anuncio": listing.get("status"),
+                "anunciante_nome": advertiser.get("name") or contact.get("name"),
+                "anunciante_telefone": str(contact.get("phones")) if contact.get("phones") else None,
+                "listing_id": listing.get("id"),
+                "stamps": stamps_str,
+                "contract_type": price_info.get("businessType"),
+                "zona": address.get("zone"),
+                "periodo_iptu": price_info.get("iptuPeriod"),
+                "garantias_aluguel": "|".join(warranties) if warranties else None,
+                "aluguel_total": float(aluguel_total) if aluguel_total else None,
             }
         except (KeyError, IndexError, TypeError, ValueError):
             return None

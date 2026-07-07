@@ -96,19 +96,42 @@ class Database:
                 amenities TEXT,
                 complex_amenities TEXT,
                 preco_por_m2 REAL,
-                image_count INTEGER
+                image_count INTEGER,
+                raw_json TEXT,
+                usage_types TEXT,
+                property_sub_type TEXT,
+                andar INTEGER,
+                total_andares INTEGER,
+                aceita_permuta TEXT,
+                status_anuncio TEXT,
+                anunciante_nome TEXT,
+                anunciante_telefone TEXT,
+                listing_id TEXT,
+                stamps TEXT,
+                contract_type TEXT,
+                zona TEXT,
+                periodo_iptu TEXT,
+                garantias_aluguel TEXT,
+                aluguel_total REAL,
+                imovel_disponivel TEXT,
+                imovel_atualizado TEXT
             )
         """
         self._execute(sql)
         # Adiciona colunas novas se tabela já existir
-        for col in [
-            "ALTER TABLE anuncios ADD COLUMN amenities TEXT",
-            "ALTER TABLE anuncios ADD COLUMN complex_amenities TEXT",
-            "ALTER TABLE anuncios ADD COLUMN preco_por_m2 REAL",
-            "ALTER TABLE anuncios ADD COLUMN image_count INTEGER",
-        ]:
+        new_columns = [
+            "amenities TEXT", "complex_amenities TEXT", "preco_por_m2 REAL",
+            "image_count INTEGER", "raw_json TEXT", "usage_types TEXT",
+            "property_sub_type TEXT", "andar INTEGER", "total_andares INTEGER",
+            "aceita_permuta TEXT", "status_anuncio TEXT", "anunciante_nome TEXT",
+            "anunciante_telefone TEXT", "listing_id TEXT", "stamps TEXT",
+            "contract_type TEXT", "zona TEXT", "periodo_iptu TEXT",
+            "garantias_aluguel TEXT", "aluguel_total REAL",
+            "imovel_disponivel TEXT", "imovel_atualizado TEXT",
+        ]
+        for col in new_columns:
             try:
-                self._execute(col)
+                self._execute(f"ALTER TABLE anuncios ADD COLUMN {col}")
             except Exception:
                 pass  # Coluna já existe
         self._execute("CREATE INDEX IF NOT EXISTS idx_portal ON anuncios(portal)")
