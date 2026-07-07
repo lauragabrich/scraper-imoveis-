@@ -92,10 +92,25 @@ class Database:
                 suites INTEGER,
                 cep TEXT,
                 data_coleta TEXT,
-                data_atualizacao_scraper TEXT
+                data_atualizacao_scraper TEXT,
+                amenities TEXT,
+                complex_amenities TEXT,
+                preco_por_m2 REAL,
+                image_count INTEGER
             )
         """
         self._execute(sql)
+        # Adiciona colunas novas se tabela já existir
+        for col in [
+            "ALTER TABLE anuncios ADD COLUMN amenities TEXT",
+            "ALTER TABLE anuncios ADD COLUMN complex_amenities TEXT",
+            "ALTER TABLE anuncios ADD COLUMN preco_por_m2 REAL",
+            "ALTER TABLE anuncios ADD COLUMN image_count INTEGER",
+        ]:
+            try:
+                self._execute(col)
+            except Exception:
+                pass  # Coluna já existe
         self._execute("CREATE INDEX IF NOT EXISTS idx_portal ON anuncios(portal)")
         self._execute("CREATE INDEX IF NOT EXISTS idx_cidade ON anuncios(cidade)")
         self._execute("CREATE INDEX IF NOT EXISTS idx_bairro ON anuncios(bairro)")

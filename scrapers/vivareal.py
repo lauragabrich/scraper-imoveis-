@@ -218,6 +218,7 @@ class VivaRealScraper(BaseScraper):
             # Fotos
             images = item.get("medias", [])
             fotos = "|".join([m.get("url", "") for m in images if m.get("url")]) or None
+            image_count = len(images)
 
             # Preço
             preco = price_info.get("price")
@@ -242,16 +243,31 @@ class VivaRealScraper(BaseScraper):
             # Coordenadas
             point = address.get("point", {})
 
+            # Amenities
+            amenities = listing.get("amenities", [])
+            amenities_str = "|".join(amenities) if amenities else None
+
+            # Complex amenities (do condomínio)
+            complex_amenities = listing.get("usageTypes", [])
+            # Tenta pegar de outros campos
+            complex_raw = listing.get("complexAmenities") or listing.get("condominiumAmenities") or []
+            complex_str = "|".join(complex_raw) if complex_raw else None
+
+            # Preço por m²
+            area_val = float(usable[0]) if usable and usable[0] else None
+            preco_val = float(preco) if preco else None
+            preco_por_m2 = round(preco_val / area_val, 2) if preco_val and area_val and area_val > 0 else None
+
             return {
                 "url": url,
                 "titulo": listing.get("title"),
                 "descricao": listing.get("description"),
                 "tipo": self._map_tipo(listing.get("unitTypes", [None])[0]) if listing.get("unitTypes") else None,
                 "finalidade": price_info.get("businessType", "SALE").replace("SALE", "venda").replace("RENTAL", "aluguel"),
-                "preco": float(preco) if preco else None,
+                "preco": preco_val,
                 "preco_condominio": float(price_info.get("monthlyCondoFee")) if price_info.get("monthlyCondoFee") else None,
                 "iptu": float(price_info.get("yearlyIptu")) if price_info.get("yearlyIptu") else None,
-                "area_construida": float(usable[0]) if usable and usable[0] else None,
+                "area_construida": area_val,
                 "area_terreno": float(total[0]) if total and total[0] else None,
                 "quartos": int(listing.get("bedrooms", [0])[0]) if listing.get("bedrooms") else None,
                 "suites": int(listing.get("suites", [0])[0]) if listing.get("suites") else None,
@@ -265,8 +281,12 @@ class VivaRealScraper(BaseScraper):
                 "latitude": point.get("lat"),
                 "longitude": point.get("lon"),
                 "fotos_urls": fotos,
+                "image_count": image_count,
                 "data_publicacao": created,
                 "data_ultima_atualizacao": updated,
+                "amenities": amenities_str,
+                "complex_amenities": complex_str,
+                "preco_por_m2": preco_por_m2,
             }
         except (KeyError, IndexError, TypeError, ValueError):
             return None
