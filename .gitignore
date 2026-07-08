@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 cache/
 *.db
+progress.json
+bairros_cache.json
