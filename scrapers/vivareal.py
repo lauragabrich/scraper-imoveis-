@@ -46,6 +46,58 @@ class VivaRealScraper(BaseScraper):
             "Accept": "application/json",
         }
 
+    def discover_cidades(self, estado: str) -> list[str]:
+        """Descobre todas as cidades de um estado via API de locations."""
+        cache = self._load_bairros_cache()
+        key = f"cidades_{estado}"
+        if key in cache:
+            return cache[key]
+
+        print(f"[vivareal] Descobrindo cidades de {estado}...")
+
+        cidades = set()
+        estado_nome = self.ESTADOS.get(estado.upper(), estado)
+
+        # Busca A-Z + termos comuns
+        queries = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ") + [
+            "São", "Santa", "Santo", "Nova", "Novo", "Campo", "Belo",
+            "Rio", "Vila", "Volta", "Feira", "Porto", "Barra",
+        ]
+
+        for query in queries:
+            self.rate_limiter.wait()
+            try:
+                params = {
+                    "q": query,
+                    "addressState": estado_nome,
+                    "size": "50",
+                }
+                r = requests.get(
+                    self.LOCATIONS_URL,
+                    params=params,
+                    headers=self._get_api_headers(),
+                    timeout=15,
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    cities = data.get("city", {}).get("result", {}).get("locations", [])
+                    for c in cities:
+                        addr = c.get("address", {})
+                        name = addr.get("city")
+                        st = addr.get("stateAcronym")
+                        if name and st and st.upper() == estado.upper():
+                            cidades.add(name)
+            except Exception:
+                continue
+
+        cidades_list = sorted(list(cidades))
+        print(f"[vivareal] {len(cidades_list)} cidades encontradas em {estado}")
+
+        cache[key] = cidades_list
+        self._save_bairros_cache(cache)
+
+        return cidades_list
+
     def discover_bairros(self, estado: str, cidade: str) -> list[str]:
         """Descobre bairros de uma cidade via API de locations."""
         # Verifica cache
@@ -168,44 +220,67 @@ class VivaRealScraper(BaseScraper):
         return saved
 
     def run(self, estado: str = "SP", cidade: str = "", limit: int = None, start_page: int = 1):
-        """Executa scraping por bairro. Retorna (saved, last_index)."""
+        """Executa scraping por cidade e bairro. Retorna (saved, last_index)."""
         from tqdm import tqdm
 
-        cidade = cidade or self.CAPITAIS.get(estado.upper(), "")
-
         print(f"\n{'='*60}")
-        print(f"Scraping VivaReal: {cidade}/{estado} (por bairro)")
+        print(f"Scraping VivaReal: {estado} (todas as cidades)")
         print(f"{'='*60}\n")
 
-        # Descobre bairros
-        bairros = self.discover_bairros(estado, cidade)
+        # Se cidade específica foi passada, processa só ela
+        if cidade:
+            cidades = [cidade]
+        else:
+            cidades = self.discover_cidades(estado)
+            if not cidades:
+                # Fallback para capital
+                capital = self.CAPITAIS.get(estado.upper(), "")
+                cidades = [capital] if capital else []
 
-        if not bairros:
-            print(f"[vivareal] Nenhum bairro encontrado para {cidade}/{estado}")
+        if not cidades:
+            print(f"[vivareal] Nenhuma cidade encontrada para {estado}")
             return 0, -1
 
-        # start_page aqui é o índice do bairro para continuar
-        start_idx = start_page - 1 if start_page > 0 else 0
-        bairros_restantes = bairros[start_idx:]
-
-        print(f"[vivareal] {len(bairros_restantes)} bairros para processar (de {len(bairros)} total)")
+        # start_page aqui é o índice global (cidade*1000 + bairro)
+        # Formato: start_page = cidade_idx * 1000 + bairro_idx + 1
+        start_cidade_idx = (start_page - 1) // 1000 if start_page > 1 else 0
+        start_bairro_idx = (start_page - 1) % 1000 if start_page > 1 else 0
 
         total_saved = 0
-        last_idx = start_idx
+        last_progress = start_page
 
-        for i, bairro in enumerate(tqdm(bairros_restantes, desc=f"[{estado}] Bairros")):
-            saved = self.scrape_bairro(estado, cidade, bairro)
-            total_saved += saved
-            last_idx = start_idx + i + 1
+        for cidade_idx in range(start_cidade_idx, len(cidades)):
+            cidade_nome = cidades[cidade_idx]
+            bairros = self.discover_bairros(estado, cidade_nome)
 
-            if limit and total_saved >= limit:
-                break
+            if not bairros:
+                # Tenta buscar sem bairro (cidade inteira)
+                print(f"[{estado}] {cidade_nome}: sem bairros, buscando direto...")
+                saved = self.scrape_bairro(estado, cidade_nome, "")
+                total_saved += saved
+                last_progress = (cidade_idx + 1) * 1000 + 1
+                continue
 
-        if last_idx >= len(bairros):
-            last_idx = -1  # concluído
+            bairro_start = start_bairro_idx if cidade_idx == start_cidade_idx else 0
+            bairros_restantes = bairros[bairro_start:]
 
-        print(f"\n[vivareal] {cidade}/{estado}: {total_saved} anúncios salvos")
-        return total_saved, last_idx + 1 if last_idx != -1 else -1
+            print(f"[{estado}] {cidade_nome}: {len(bairros_restantes)} bairros")
+
+            for bairro_idx, bairro in enumerate(bairros_restantes):
+                saved = self.scrape_bairro(estado, cidade_nome, bairro)
+                total_saved += saved
+                actual_bairro_idx = bairro_start + bairro_idx + 1
+                last_progress = cidade_idx * 1000 + actual_bairro_idx + 1
+
+                if limit and total_saved >= limit:
+                    print(f"\n[vivareal] Limite de {limit} atingido")
+                    return total_saved, last_progress
+
+            # Cidade concluída
+            start_bairro_idx = 0
+
+        print(f"\n[vivareal] {estado}: {total_saved} anúncios salvos ({len(cidades)} cidades)")
+        return total_saved, -1
 
     def _parse_listing(self, item: dict) -> dict | None:
         """Parse de um anúncio da API - extrai TODOS os campos disponíveis."""
