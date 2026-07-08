@@ -37,9 +37,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: progress.json
-          key: scraper-progress-${{ github.run_id }}
-          restore-keys: |
-            scraper-progress-
+          key: scraper-progress
+          restore-keys: scraper-progress
 
       - name: Rodar scraper
         env:
