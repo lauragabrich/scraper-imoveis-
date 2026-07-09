@@ -1,14 +1,15 @@
 # Scraper VivaReal - Imóveis Brasil
 
-Coleta dados de anúncios imobiliários do VivaReal (~1.6M anúncios ativos) via API interna, com busca por bairro para cobertura máxima.
+Coleta dados de anúncios imobiliários do VivaReal (~1.6M anúncios ativos) via API interna, com busca por cidade e bairro para cobertura nacional completa.
 
 ## Como funciona
 
-1. Descobre bairros de cada capital via API de locations (busca A-Z + termos comuns)
-2. Para cada bairro, pagina todos os anúncios disponíveis (24 por página)
-3. Salva no banco Turso (SQLite remoto, 5GB grátis)
-4. Roda automaticamente na nuvem via GitHub Actions (a cada 6h)
-5. Progresso salvo entre execuções — continua de onde parou
+1. Para cada estado, descobre todas as **cidades** via API de locations
+2. Para cada cidade, descobre todos os **bairros**
+3. Para cada bairro, pagina todos os anúncios disponíveis (24 por página)
+4. Salva no banco Turso (SQLite remoto, 5GB grátis)
+5. Roda automaticamente na nuvem via GitHub Actions (a cada 6h)
+6. Progresso salvo entre execuções — continua de onde parou
 
 ## Dados coletados (todos os campos disponíveis)
 
@@ -68,5 +69,6 @@ O workflow roda a cada 6h automaticamente. Configuração:
 
 - API não documentada — pode mudar sem aviso
 - Limite de ~10k resultados por busca (contornado pela busca por bairro)
-- Bairros descobertos via API de locations — pode não pegar 100% dos bairros menores
+- Cidades descobertas via API — pode não pegar 100% das cidades menores
 - Delay de 1-3s entre requests (rate limiting)
+- Turso free: 5GB (~500k-800k anúncios com raw_json)
