@@ -51,9 +51,10 @@ class VivaRealScraper(BaseScraper):
         cache = self._load_bairros_cache()
         key = f"cidades_{estado}"
         if key in cache:
+            print(f"[vivareal] Cidades de {estado} (cache): {len(cache[key])}")
             return cache[key]
 
-        print(f"[vivareal] Descobrindo cidades de {estado}...")
+        print(f"[vivareal] Descobrindo cidades de {estado}...", flush=True)
 
         cidades = set()
         estado_nome = self.ESTADOS.get(estado.upper(), estado)
@@ -87,11 +88,12 @@ class VivaRealScraper(BaseScraper):
                         st = addr.get("stateAcronym")
                         if name and st and st.upper() == estado.upper():
                             cidades.add(name)
-            except Exception:
+            except Exception as e:
+                print(f"[vivareal] Erro descobrindo cidades: {e}", flush=True)
                 continue
 
         cidades_list = sorted(list(cidades))
-        print(f"[vivareal] {len(cidades_list)} cidades encontradas em {estado}")
+        print(f"[vivareal] {len(cidades_list)} cidades encontradas em {estado}", flush=True)
 
         cache[key] = cidades_list
         self._save_bairros_cache(cache)
@@ -221,11 +223,11 @@ class VivaRealScraper(BaseScraper):
 
     def run(self, estado: str = "SP", cidade: str = "", limit: int = None, start_page: int = 1):
         """Executa scraping por cidade e bairro. Retorna (saved, last_index)."""
-        from tqdm import tqdm
+        import sys
 
-        print(f"\n{'='*60}")
-        print(f"Scraping VivaReal: {estado} (todas as cidades)")
-        print(f"{'='*60}\n")
+        print(f"\n{'='*60}", flush=True)
+        print(f"Scraping VivaReal: {estado} (todas as cidades)", flush=True)
+        print(f"{'='*60}\n", flush=True)
 
         # Se cidade específica foi passada, processa só ela
         if cidade:
@@ -238,24 +240,27 @@ class VivaRealScraper(BaseScraper):
                 cidades = [capital] if capital else []
 
         if not cidades:
-            print(f"[vivareal] Nenhuma cidade encontrada para {estado}")
+            print(f"[vivareal] Nenhuma cidade encontrada para {estado}", flush=True)
             return 0, -1
 
         # start_page aqui é o índice global (cidade*1000 + bairro)
-        # Formato: start_page = cidade_idx * 1000 + bairro_idx + 1
         start_cidade_idx = (start_page - 1) // 1000 if start_page > 1 else 0
         start_bairro_idx = (start_page - 1) % 1000 if start_page > 1 else 0
+
+        print(f"[vivareal] {len(cidades)} cidades para processar", flush=True)
 
         total_saved = 0
         last_progress = start_page
 
         for cidade_idx in range(start_cidade_idx, len(cidades)):
             cidade_nome = cidades[cidade_idx]
+            print(f"\n[{estado}] Cidade {cidade_idx+1}/{len(cidades)}: {cidade_nome}", flush=True)
+
             bairros = self.discover_bairros(estado, cidade_nome)
 
             if not bairros:
                 # Tenta buscar sem bairro (cidade inteira)
-                print(f"[{estado}] {cidade_nome}: sem bairros, buscando direto...")
+                print(f"  Sem bairros, buscando direto...", flush=True)
                 saved = self.scrape_bairro(estado, cidade_nome, "")
                 total_saved += saved
                 last_progress = (cidade_idx + 1) * 1000 + 1
@@ -264,7 +269,7 @@ class VivaRealScraper(BaseScraper):
             bairro_start = start_bairro_idx if cidade_idx == start_cidade_idx else 0
             bairros_restantes = bairros[bairro_start:]
 
-            print(f"[{estado}] {cidade_nome}: {len(bairros_restantes)} bairros")
+            print(f"  {len(bairros_restantes)} bairros", flush=True)
 
             for bairro_idx, bairro in enumerate(bairros_restantes):
                 saved = self.scrape_bairro(estado, cidade_nome, bairro)
@@ -272,14 +277,17 @@ class VivaRealScraper(BaseScraper):
                 actual_bairro_idx = bairro_start + bairro_idx + 1
                 last_progress = cidade_idx * 1000 + actual_bairro_idx + 1
 
+                if saved > 0:
+                    print(f"    {bairro}: +{saved} ({total_saved} total)", flush=True)
+
                 if limit and total_saved >= limit:
-                    print(f"\n[vivareal] Limite de {limit} atingido")
+                    print(f"\n[vivareal] Limite de {limit} atingido", flush=True)
                     return total_saved, last_progress
 
             # Cidade concluída
             start_bairro_idx = 0
 
-        print(f"\n[vivareal] {estado}: {total_saved} anúncios salvos ({len(cidades)} cidades)")
+        print(f"\n[vivareal] {estado}: {total_saved} anúncios salvos ({len(cidades)} cidades)", flush=True)
         return total_saved, -1
 
     def _parse_listing(self, item: dict) -> dict | None:
