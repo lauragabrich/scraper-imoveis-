@@ -17,6 +17,44 @@ class Database:
             "Content-Type": "application/json",
         }
         self._create_table()
+        self._create_progress_table()
+
+    def _create_progress_table(self):
+        """Cria tabela de progresso no banco."""
+        sql = """
+            CREATE TABLE IF NOT EXISTS scraper_progress (
+                estado TEXT PRIMARY KEY,
+                last_page INTEGER DEFAULT 1,
+                updated_at TEXT
+            )
+        """
+        try:
+            self._execute(sql)
+        except Exception:
+            pass
+
+    def get_progress(self, estado: str) -> int:
+        """Retorna a última página processada de um estado."""
+        try:
+            result = self._execute(
+                "SELECT last_page FROM scraper_progress WHERE estado = ?", [estado]
+            )
+            rows = result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", [])
+            if rows:
+                return int(rows[0][0].get("value", 1))
+        except Exception:
+            pass
+        return 1
+
+    def save_progress(self, estado: str, last_page: int):
+        """Salva progresso no banco."""
+        try:
+            self._execute(
+                "INSERT OR REPLACE INTO scraper_progress (estado, last_page, updated_at) VALUES (?, ?, ?)",
+                [estado, last_page, datetime.utcnow().isoformat()]
+            )
+        except Exception as e:
+            print(f"Erro salvando progresso: {e}", flush=True)
 
     def _execute(self, sql: str, args: list = None) -> dict:
         """Executa uma query SQL via Turso HTTP API."""

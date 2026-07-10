@@ -1,10 +1,8 @@
 name: Scraper VivaReal
 
 on:
-  # Roda a cada 6 horas automaticamente
   schedule:
     - cron: '0 */6 * * *'
-  # Permite rodar manualmente pelo GitHub
   workflow_dispatch:
     inputs:
       estado:
@@ -19,26 +17,15 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 350  # Máximo ~6h
+    timeout-minutes: 350
 
     steps:
-      - name: Checkout código
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Instalar dependências
-        run: pip install -r requirements.txt
-
-      - name: Baixar progresso salvo
-        uses: actions/cache@v4
-        with:
-          path: progress.json
-          key: scraper-progress
-          restore-keys: scraper-progress
+      - run: pip install -r requirements.txt
 
       - name: Rodar scraper
         env:
@@ -60,10 +47,3 @@ jobs:
 
           echo "Executando: $CMD"
           $CMD
-
-      - name: Salvar progresso
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: progress.json
-          key: scraper-progress-${{ github.run_id }}
