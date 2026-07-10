@@ -5,4 +5,3 @@ cache/
 *.db
 progress.json
 bairros_cache.json
-cidades_ibge.json

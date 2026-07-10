@@ -27,17 +27,24 @@ def get_all_cidades() -> dict[str, list[str]]:
     resultado = {}
 
     for estado, codigo in ESTADOS_IBGE.items():
-        try:
-            url = f"https://servicodados.ibge.gov.br/api/v1/localidades/estados/{codigo}/municipios"
-            r = requests.get(url, timeout=30)
-            if r.status_code == 200:
-                municipios = r.json()
-                cidades = [m.get("nome") for m in municipios if m.get("nome")]
-                resultado[estado] = sorted(cidades)
-                print(f"  {estado}: {len(cidades)} cidades", flush=True)
-        except Exception as e:
-            print(f"  {estado}: erro - {e}", flush=True)
-            resultado[estado] = []
+        # Tenta 3 vezes com timeout maior
+        for tentativa in range(3):
+            try:
+                url = f"https://servicodados.ibge.gov.br/api/v1/localidades/estados/{codigo}/municipios"
+                r = requests.get(url, timeout=60)
+                if r.status_code == 200:
+                    municipios = r.json()
+                    cidades = [m.get("nome") for m in municipios if m.get("nome")]
+                    resultado[estado] = sorted(cidades)
+                    print(f"  {estado}: {len(cidades)} cidades", flush=True)
+                    break
+            except Exception as e:
+                if tentativa == 2:
+                    print(f"  {estado}: erro após 3 tentativas - {e}", flush=True)
+                    resultado[estado] = []
+                else:
+                    import time
+                    time.sleep(5)  # Espera 5s antes de tentar de novo
 
     # Salva cache
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
@@ -52,4 +59,6 @@ def get_all_cidades() -> dict[str, list[str]]:
 def get_cidades_estado(estado: str) -> list[str]:
     """Retorna lista de cidades de um estado."""
     todas = get_all_cidades()
-    return todas.get(estado.upper(), [])
+    cidades = todas.get(estado.upper(), [])
+    # Se falhou no IBGE, retorna lista vazia (cidade será pulada)
+    return cidades
