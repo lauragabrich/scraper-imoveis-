@@ -1,17 +1,19 @@
 # Scraper VivaReal - Imóveis Brasil
 
-Coleta dados de anúncios imobiliários do VivaReal (~1.6M anúncios ativos) via API interna, com busca por cidade e bairro para cobertura nacional completa.
+Coleta **todos** os anúncios imobiliários de venda do VivaReal no Brasil inteiro via API interna — imóveis usados e lançamentos, todas as cidades, todos os bairros.
 
 ## Como funciona
 
-1. Para cada estado, descobre todas as **cidades** via API de locations
-2. Para cada cidade, descobre todos os **bairros**
-3. Para cada bairro, pagina todos os anúncios disponíveis (24 por página)
-4. Salva no banco Turso (SQLite remoto, 5GB grátis)
-5. Roda automaticamente na nuvem via GitHub Actions (a cada 6h)
-6. Progresso salvo entre execuções — continua de onde parou
+1. Para cada **estado** (27), descobre todas as **cidades** via API de locations
+2. Para cada **cidade**, descobre todos os **bairros**
+3. Para cada **bairro**, busca anúncios de venda:
+   - Imóveis usados (`USED`)
+   - Lançamentos (`DEVELOPMENT`)
+4. Salva no banco **Turso** (SQLite remoto)
+5. Progresso salvo **no próprio banco** — continua de onde parou entre execuções
+6. Roda automaticamente via **GitHub Actions** a cada 6h
 
-## Dados coletados (todos os campos disponíveis)
+## Dados coletados (todos os campos disponíveis na API)
 
 | Categoria | Campos |
 |-----------|--------|
@@ -31,44 +33,57 @@ Coleta dados de anúncios imobiliários do VivaReal (~1.6M anúncios ativos) via
 ```bash
 pip install -r requirements.txt
 
-# Um estado com limite
-python main.py --estado SP --limit 100
+# Um estado
+python main.py --estado SP
 
-# Todos os estados sem limite
+# Cidade específica
+python main.py --estado SP --cidade "Campinas"
+
+# Todos os estados (Brasil inteiro)
 python main.py --all-estados
 
-# Resetar progresso (reprocessa tudo)
+# Com limite
+python main.py --estado SP --limit 100
+
+# Resetar progresso
 python main.py --all-estados --reset
 ```
 
-## GitHub Actions (execução automática)
+## GitHub Actions
 
-O workflow roda a cada 6h automaticamente. Configuração:
-1. Adicionar secrets no repo: `TURSO_DATABASE_URL` e `TURSO_AUTH_TOKEN`
-2. O scraper continua de onde parou entre execuções
+Roda automaticamente a cada 6h. Configuração:
+1. Adicionar secrets: `TURSO_DATABASE_URL` e `TURSO_AUTH_TOKEN`
+2. Progresso salvo no banco — não depende de cache do GitHub
 3. Repositório público = minutos ilimitados
 
 ## Estrutura
 
 ```
-├── config/settings.py         # Configurações e constantes
+├── config/settings.py         # Configurações
 ├── scrapers/
-│   ├── base.py                # Classe base (retry, rate limit, paginação)
-│   └── vivareal.py            # API VivaReal + busca por bairro
+│   ├── base.py                # Classe base (retry, rate limit)
+│   └── vivareal.py            # API VivaReal (cidades + bairros + paginação)
 ├── parsers/extractor.py       # Utilitários de extração
-├── storage/database.py        # Turso HTTP API
+├── storage/database.py        # Turso HTTP API + progresso
 ├── utils/
-│   ├── proxy_manager.py       # Rotação de proxies (opcional)
+│   ├── proxy_manager.py       # Proxies (opcional)
 │   └── rate_limiter.py        # Delays entre requests
-├── main.py                    # Entry point com progresso
+├── main.py                    # Entry point
 ├── .github/workflows/         # GitHub Actions
 └── requirements.txt
 ```
 
+## Cobertura
+
+- ✅ 27 estados
+- ✅ Todas as cidades com anúncios (~50-100 por estado)
+- ✅ Todos os bairros de cada cidade
+- ✅ Imóveis usados + lançamentos
+- ✅ Apenas venda (aluguel excluído intencionalmente)
+
 ## Limitações
 
 - API não documentada — pode mudar sem aviso
-- Limite de ~10k resultados por busca (contornado pela busca por bairro)
-- Cidades descobertas via API — pode não pegar 100% das cidades menores
-- Delay de 1-3s entre requests (rate limiting)
-- Turso free: 5GB (~500k-800k anúncios com raw_json)
+- Cidades muito pequenas (sem anúncios no VivaReal) não aparecem na API de locations
+- Delay de 1-3s entre requests
+- Limite de ~10k resultados por bairro (raro de atingir)
