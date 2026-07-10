@@ -164,7 +164,7 @@ class VivaRealScraper(BaseScraper):
         with open(self.BAIRROS_CACHE, "w", encoding="utf-8") as f:
             json.dump(cache, f, ensure_ascii=False, indent=2)
 
-    def _make_request(self, estado: str, cidade: str, bairro: str, page: int, size: int = 24):
+    def _make_request(self, estado: str, cidade: str, bairro: str, page: int, size: int = 24, listing_type: str = "USED"):
         """Faz request na API do VivaReal com bairro."""
         estado_nome = self.ESTADOS.get(estado.upper(), estado)
         params = {
@@ -172,7 +172,7 @@ class VivaRealScraper(BaseScraper):
             "addressCity": cidade,
             "addressNeighborhood": bairro,
             "businessType": "SALE",
-            "listingType": "USED",
+            "listingType": listing_type,
             "size": str(size),
             "from": str((page - 1) * size),
             "categoryPage": "RESULT",
@@ -196,16 +196,27 @@ class VivaRealScraper(BaseScraper):
         return []
 
     def scrape_bairro(self, estado: str, cidade: str, bairro: str, limit_pages: int = 420) -> int:
-        """Scrape todos os anúncios de um bairro. Retorna quantidade salva."""
+        """Scrape todos os anúncios de um bairro (usados + lançamentos). Retorna quantidade salva."""
+        saved = 0
+
+        # Busca imóveis usados
+        saved += self._scrape_bairro_type(estado, cidade, bairro, "USED", limit_pages)
+        # Busca lançamentos
+        saved += self._scrape_bairro_type(estado, cidade, bairro, "DEVELOPMENT", limit_pages)
+
+        return saved
+
+    def _scrape_bairro_type(self, estado: str, cidade: str, bairro: str, listing_type: str, limit_pages: int = 420) -> int:
+        """Scrape anúncios de um tipo específico."""
         saved = 0
 
         for page in range(1, limit_pages + 1):
             try:
-                data = self._make_request(estado, cidade, bairro, page)
+                data = self._make_request(estado, cidade, bairro, page, listing_type=listing_type)
                 listings = data.get("search", {}).get("result", {}).get("listings", [])
 
                 if not listings:
-                    break  # Sem mais resultados
+                    break
 
                 for item in listings:
                     parsed = self._parse_listing(item)
