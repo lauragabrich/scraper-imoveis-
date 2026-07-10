@@ -177,9 +177,10 @@ class VivaRealScraper(BaseScraper):
 
         return saved
 
-    def _scrape_bairro_type(self, estado: str, cidade: str, bairro: str, listing_type: str, limit_pages: int = 420) -> int:
+    def _scrape_bairro_type(self, estado: str, cidade: str, bairro: str, listing_type: str, limit_pages: int = 100) -> int:
         """Scrape anúncios de um tipo específico."""
         saved = 0
+        empty_pages = 0
 
         for page in range(1, limit_pages + 1):
             try:
@@ -187,7 +188,12 @@ class VivaRealScraper(BaseScraper):
                 listings = data.get("search", {}).get("result", {}).get("listings", [])
 
                 if not listings:
-                    break
+                    empty_pages += 1
+                    if empty_pages >= 2:
+                        break
+                    continue
+
+                empty_pages = 0
 
                 for item in listings:
                     parsed = self._parse_listing(item)
@@ -199,7 +205,7 @@ class VivaRealScraper(BaseScraper):
             except Exception as e:
                 if "400" in str(e) or "429" in str(e):
                     break
-                continue
+                break  # Qualquer erro, pula para o próximo
 
         return saved
 
