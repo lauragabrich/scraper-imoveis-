@@ -47,58 +47,12 @@ class VivaRealScraper(BaseScraper):
         }
 
     def discover_cidades(self, estado: str) -> list[str]:
-        """Descobre todas as cidades de um estado via API de locations."""
-        cache = self._load_bairros_cache()
-        key = f"cidades_{estado}"
-        if key in cache:
-            print(f"[vivareal] Cidades de {estado} (cache): {len(cache[key])}")
-            return cache[key]
+        """Retorna todas as cidades de um estado (via IBGE - lista completa)."""
+        from utils.ibge_cidades import get_cidades_estado
 
-        print(f"[vivareal] Descobrindo cidades de {estado}...", flush=True)
-
-        cidades = set()
-        estado_nome = self.ESTADOS.get(estado.upper(), estado)
-
-        # Busca A-Z + termos comuns
-        queries = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ") + [
-            "São", "Santa", "Santo", "Nova", "Novo", "Campo", "Belo",
-            "Rio", "Vila", "Volta", "Feira", "Porto", "Barra",
-        ]
-
-        for query in queries:
-            self.rate_limiter.wait()
-            try:
-                params = {
-                    "q": query,
-                    "addressState": estado_nome,
-                    "size": "50",
-                }
-                r = requests.get(
-                    self.LOCATIONS_URL,
-                    params=params,
-                    headers=self._get_api_headers(),
-                    timeout=15,
-                )
-                if r.status_code == 200:
-                    data = r.json()
-                    cities = data.get("city", {}).get("result", {}).get("locations", [])
-                    for c in cities:
-                        addr = c.get("address", {})
-                        name = addr.get("city")
-                        st = addr.get("stateAcronym")
-                        if name and st and st.upper() == estado.upper():
-                            cidades.add(name)
-            except Exception as e:
-                print(f"[vivareal] Erro descobrindo cidades: {e}", flush=True)
-                continue
-
-        cidades_list = sorted(list(cidades))
-        print(f"[vivareal] {len(cidades_list)} cidades encontradas em {estado}", flush=True)
-
-        cache[key] = cidades_list
-        self._save_bairros_cache(cache)
-
-        return cidades_list
+        cidades = get_cidades_estado(estado)
+        print(f"[vivareal] {len(cidades)} cidades em {estado} (IBGE)", flush=True)
+        return cidades
 
     def discover_bairros(self, estado: str, cidade: str) -> list[str]:
         """Descobre bairros de uma cidade via API de locations."""
@@ -206,6 +160,23 @@ class VivaRealScraper(BaseScraper):
 
         return saved
 
+    def scrape_cidade_completa(self, estado: str, cidade: str) -> int:
+        """Scrape uma cidade: todos os bairros + busca sem bairro (fallback)."""
+        saved = 0
+
+        # Descobre bairros
+        bairros = self.discover_bairros(estado, cidade)
+
+        # Processa cada bairro
+        if bairros:
+            for bairro in bairros:
+                saved += self.scrape_bairro(estado, cidade, bairro)
+
+        # Fallback: busca sem bairro para pegar anúncios não associados a bairros
+        saved += self.scrape_bairro(estado, cidade, "")
+
+        return saved
+
     def _scrape_bairro_type(self, estado: str, cidade: str, bairro: str, listing_type: str, limit_pages: int = 420) -> int:
         """Scrape anúncios de um tipo específico."""
         saved = 0
@@ -267,36 +238,19 @@ class VivaRealScraper(BaseScraper):
             cidade_nome = cidades[cidade_idx]
             print(f"\n[{estado}] Cidade {cidade_idx+1}/{len(cidades)}: {cidade_nome}", flush=True)
 
-            bairros = self.discover_bairros(estado, cidade_nome)
+            saved = self.scrape_cidade_completa(estado, cidade_nome)
+            total_saved += saved
+            last_progress = (cidade_idx + 1) * 1000 + 1
 
-            if not bairros:
-                # Tenta buscar sem bairro (cidade inteira)
-                print(f"  Sem bairros, buscando direto...", flush=True)
-                saved = self.scrape_bairro(estado, cidade_nome, "")
-                total_saved += saved
-                last_progress = (cidade_idx + 1) * 1000 + 1
-                continue
+            if saved > 0:
+                print(f"  → {saved} anúncios ({total_saved} total)", flush=True)
 
-            bairro_start = start_bairro_idx if cidade_idx == start_cidade_idx else 0
-            bairros_restantes = bairros[bairro_start:]
+            # Salva progresso a cada cidade
+            self.db.save_progress(estado, last_progress)
 
-            print(f"  {len(bairros_restantes)} bairros", flush=True)
-
-            for bairro_idx, bairro in enumerate(bairros_restantes):
-                saved = self.scrape_bairro(estado, cidade_nome, bairro)
-                total_saved += saved
-                actual_bairro_idx = bairro_start + bairro_idx + 1
-                last_progress = cidade_idx * 1000 + actual_bairro_idx + 1
-
-                if saved > 0:
-                    print(f"    {bairro}: +{saved} ({total_saved} total)", flush=True)
-
-                if limit and total_saved >= limit:
-                    print(f"\n[vivareal] Limite de {limit} atingido", flush=True)
-                    return total_saved, last_progress
-
-            # Cidade concluída
-            start_bairro_idx = 0
+            if limit and total_saved >= limit:
+                print(f"\n[vivareal] Limite de {limit} atingido", flush=True)
+                return total_saved, last_progress
 
         print(f"\n[vivareal] {estado}: {total_saved} anúncios salvos ({len(cidades)} cidades)", flush=True)
         return total_saved, -1
