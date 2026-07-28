@@ -6,3 +6,4 @@ python-dotenv==1.0.1
 tenacity==8.2.3
 tqdm==4.66.1
 cloudscraper==1.2.71
+pyodbc==5.1.0

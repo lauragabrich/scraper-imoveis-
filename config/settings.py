@@ -5,9 +5,11 @@ load_dotenv()
 
 
 class Settings:
-    # Database - Turso (libSQL remoto)
-    TURSO_DATABASE_URL = os.getenv("TURSO_DATABASE_URL", "")
-    TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "")
+    # Database - Azure SQL
+    AZURE_SQL_SERVER = os.getenv("AZURE_SQL_SERVER", "servidorimoveis.database.windows.net")
+    AZURE_SQL_DATABASE = os.getenv("AZURE_SQL_DATABASE", "imoveis")
+    AZURE_SQL_USER = os.getenv("AZURE_SQL_USER", "adimoveis")
+    AZURE_SQL_PASSWORD = os.getenv("AZURE_SQL_PASSWORD", "")
 
     # Scraping
     MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", "5"))

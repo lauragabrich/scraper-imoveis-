@@ -28,12 +28,21 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Instalar ODBC Driver
+        run: |
+          curl https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc
+          curl https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
+
       - run: pip install -r requirements.txt
 
       - name: Rodar scraper
         env:
-          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
-          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          AZURE_SQL_SERVER: ${{ secrets.AZURE_SQL_SERVER }}
+          AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+          AZURE_SQL_USER: ${{ secrets.AZURE_SQL_USER }}
+          AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
         run: |
           ESTADO="${{ github.event.inputs.estado || 'ALL' }}"
           LIMIT="${{ github.event.inputs.limit }}"
