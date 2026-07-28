@@ -37,6 +37,30 @@ jobs:
 
       - run: pip install -r requirements.txt
 
+      - name: Debug conexão
+        env:
+          AZURE_SQL_SERVER: ${{ secrets.AZURE_SQL_SERVER }}
+          AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+          AZURE_SQL_USER: ${{ secrets.AZURE_SQL_USER }}
+        run: |
+          echo "Server: $AZURE_SQL_SERVER"
+          echo "Database: $AZURE_SQL_DATABASE"
+          echo "User: $AZURE_SQL_USER"
+          python -c "
+          import socket, os
+          server = os.environ['AZURE_SQL_SERVER']
+          print(f'Resolvendo DNS: {server}')
+          try:
+              ip = socket.gethostbyname(server)
+              print(f'IP resolvido: {ip}')
+          except Exception as e:
+              print(f'Erro DNS: {e}')
+          import subprocess
+          result = subprocess.run(['curl', '-v', f'telnet://{server}:1433', '--connect-timeout', '10'], capture_output=True, text=True)
+          print(result.stdout)
+          print(result.stderr)
+          "
+
       - name: Acordar banco Azure SQL
         env:
           AZURE_SQL_SERVER: ${{ secrets.AZURE_SQL_SERVER }}
