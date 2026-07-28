@@ -14,10 +14,21 @@ class Database:
             f"DATABASE={settings.AZURE_SQL_DATABASE};"
             f"UID={settings.AZURE_SQL_USER};"
             f"PWD={settings.AZURE_SQL_PASSWORD};"
-            f"Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
+            f"Encrypt=yes;TrustServerCertificate=no;Connection Timeout=120;"
         )
-        self.conn = pyodbc.connect(conn_str)
-        self.conn.autocommit = True
+        # Retry para lidar com auto-pause do Azure
+        for attempt in range(3):
+            try:
+                self.conn = pyodbc.connect(conn_str)
+                self.conn.autocommit = True
+                break
+            except Exception as e:
+                if attempt < 2:
+                    import time
+                    print(f"[DB] Conexão falhou, tentando novamente em 30s... ({e})", flush=True)
+                    time.sleep(30)
+                else:
+                    raise e
         self._create_tables()
 
     def _create_tables(self):
