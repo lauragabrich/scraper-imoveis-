@@ -43,22 +43,27 @@ jobs:
           AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
           AZURE_SQL_USER: ${{ secrets.AZURE_SQL_USER }}
         run: |
-          echo "Server: $AZURE_SQL_SERVER"
-          echo "Database: $AZURE_SQL_DATABASE"
-          echo "User: $AZURE_SQL_USER"
           python -c "
           import socket, os
           server = os.environ['AZURE_SQL_SERVER']
-          print(f'Resolvendo DNS: {server}')
+          print(f'Tamanho do server: {len(server)}')
+          print(f'Primeiros 5 chars: {server[:5]}')
+          print(f'Ultimos 5 chars: {server[-5:]}')
+          print(f'Tem espaco: {\" \" in server}')
+          print(f'Tem newline: {chr(10) in server or chr(13) in server}')
+          print(f'Repr: {repr(server)}')
+          # Tenta resolver
           try:
               ip = socket.gethostbyname(server)
               print(f'IP resolvido: {ip}')
           except Exception as e:
               print(f'Erro DNS: {e}')
-          import subprocess
-          result = subprocess.run(['curl', '-v', f'telnet://{server}:1433', '--connect-timeout', '10'], capture_output=True, text=True)
-          print(result.stdout)
-          print(result.stderr)
+          # Tenta com valor hardcoded pra comparar
+          try:
+              ip2 = socket.gethostbyname('servidorimoveis.database.windows.net')
+              print(f'IP hardcoded: {ip2}')
+          except Exception as e2:
+              print(f'Erro hardcoded: {e2}')
           "
 
       - name: Acordar banco Azure SQL
