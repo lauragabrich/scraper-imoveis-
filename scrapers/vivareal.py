@@ -4,7 +4,6 @@ import os
 import time
 import random
 from scrapers.base import BaseScraper
-from parsers.extractor import DataExtractor
 from config.settings import settings
 
 
@@ -149,37 +148,91 @@ class VivaRealScraper(BaseScraper):
         """Não usado na abordagem por bairro."""
         return []
 
-    def scrape_bairro(self, estado: str, cidade: str, bairro: str, limit_pages: int = 420) -> int:
-        """Scrape todos os anúncios de um bairro (usados + lançamentos). Retorna quantidade salva."""
-        saved = 0
-
-        # Busca imóveis usados
-        saved += self._scrape_bairro_type(estado, cidade, bairro, "USED", limit_pages)
-        # Busca lançamentos
-        saved += self._scrape_bairro_type(estado, cidade, bairro, "DEVELOPMENT", limit_pages)
-
-        return saved
+    def scrape_bairro(self, estado: str, cidade: str, bairro: str, limit_pages: int = 420) -> list[dict]:
+        """Coleta todos os anúncios de um bairro (usados + lançamentos). Retorna lista."""
+        anuncios = []
+        anuncios.extend(self._collect_bairro_type(estado, cidade, bairro, "USED", limit_pages))
+        anuncios.extend(self._collect_bairro_type(estado, cidade, bairro, "DEVELOPMENT", limit_pages))
+        return anuncios
 
     def scrape_cidade_completa(self, estado: str, cidade: str) -> int:
-        """Scrape uma cidade: todos os bairros + busca sem bairro (fallback)."""
-        saved = 0
+        """Scrape uma cidade: todos os bairros + busca sem bairro + bairros descobertos no fallback.
+        Salva parcialmente a cada 30 bairros para não perder dados."""
+        anuncios = []
+        bairros_processados = set()
+        saved_total = 0
 
-        # Descobre bairros
+        # Descobre bairros via API de locations
         bairros = self.discover_bairros(estado, cidade)
 
-        # Processa cada bairro
+        # Processa cada bairro encontrado, salvando parcialmente a cada 30
         if bairros:
-            for bairro in bairros:
-                saved += self.scrape_bairro(estado, cidade, bairro)
+            for i, bairro in enumerate(bairros):
+                bairros_processados.add(bairro.lower())
+                anuncios.extend(self._collect_bairro(estado, cidade, bairro))
 
-        # Fallback: busca sem bairro para pegar anúncios não associados a bairros
-        saved += self.scrape_bairro(estado, cidade, "")
+                # Salvamento parcial a cada 30 bairros
+                if (i + 1) % 30 == 0 and anuncios:
+                    saved_total += self._save_partial(anuncios, estado, cidade, saved_total)
+                    anuncios = []
 
-        return saved
+        # Fallback: busca sem bairro e descobre bairros que escaparam
+        fallback_anuncios = self._collect_bairro(estado, cidade, "")
 
-    def _scrape_bairro_type(self, estado: str, cidade: str, bairro: str, listing_type: str, limit_pages: int = 100) -> int:
-        """Scrape anúncios de um tipo específico."""
-        saved = 0
+        # Extrai bairros novos dos resultados do fallback
+        bairros_novos = set()
+        for anuncio in fallback_anuncios:
+            bairro_nome = anuncio.get("bairro")
+            if bairro_nome and bairro_nome.lower() not in bairros_processados:
+                bairros_novos.add(bairro_nome)
+
+        anuncios.extend(fallback_anuncios)
+
+        # Processa bairros que foram descobertos no fallback
+        if bairros_novos:
+            print(f"  [vivareal] {len(bairros_novos)} bairros novos descobertos no fallback", flush=True)
+            for bairro in bairros_novos:
+                bairros_processados.add(bairro.lower())
+                anuncios.extend(self._collect_bairro(estado, cidade, bairro))
+
+        # Salvamento final (o que sobrou)
+        if anuncios:
+            saved_total += self._save_partial(anuncios, estado, cidade, saved_total)
+
+        return saved_total
+
+    def _save_partial(self, anuncios: list[dict], estado: str, cidade: str, offset: int) -> int:
+        """Salva lote parcial no S3, removendo duplicatas. Retorna quantidade salva."""
+        # Remove duplicatas por URL
+        seen_urls = set()
+        anuncios_unicos = []
+        for anuncio in anuncios:
+            url = anuncio.get("url")
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                anuncios_unicos.append(anuncio)
+
+        if not anuncios_unicos:
+            return 0
+
+        # Se é a primeira parte, salva como arquivo principal; senão, como parte
+        if offset == 0:
+            success = self.storage.save_anuncios(anuncios_unicos, estado, cidade, self.PORTAL_NAME)
+        else:
+            success = self.storage.save_anuncios(anuncios_unicos, estado, cidade, self.PORTAL_NAME, part=offset)
+
+        return len(anuncios_unicos) if success else 0
+
+    def _collect_bairro(self, estado: str, cidade: str, bairro: str) -> list[dict]:
+        """Coleta anúncios de um bairro (usados + lançamentos). Retorna lista."""
+        anuncios = []
+        anuncios.extend(self._collect_bairro_type(estado, cidade, bairro, "USED"))
+        anuncios.extend(self._collect_bairro_type(estado, cidade, bairro, "DEVELOPMENT"))
+        return anuncios
+
+    def _collect_bairro_type(self, estado: str, cidade: str, bairro: str, listing_type: str, limit_pages: int = 420) -> list[dict]:
+        """Coleta anúncios de um tipo específico. Retorna lista."""
+        anuncios = []
         empty_pages = 0
 
         for page in range(1, limit_pages + 1):
@@ -199,19 +252,17 @@ class VivaRealScraper(BaseScraper):
                     parsed = self._parse_listing(item)
                     if parsed:
                         parsed["portal"] = self.PORTAL_NAME
-                        if self.db.save_anuncio(parsed):
-                            saved += 1
+                        anuncios.append(parsed)
 
             except Exception as e:
                 if "400" in str(e) or "429" in str(e):
                     break
-                break  # Qualquer erro, pula para o próximo
+                break
 
-        return saved
+        return anuncios
 
     def run(self, estado: str = "SP", cidade: str = "", limit: int = None, start_page: int = 1):
         """Executa scraping por cidade e bairro. Retorna (saved, last_index)."""
-        import sys
 
         print(f"\n{'='*60}", flush=True)
         print(f"Scraping VivaReal: {estado} (todas as cidades)", flush=True)
@@ -233,7 +284,6 @@ class VivaRealScraper(BaseScraper):
 
         # start_page aqui é o índice global (cidade*1000 + bairro)
         start_cidade_idx = (start_page - 1) // 1000 if start_page > 1 else 0
-        start_bairro_idx = (start_page - 1) % 1000 if start_page > 1 else 0
 
         print(f"[vivareal] {len(cidades)} cidades para processar", flush=True)
 
@@ -252,7 +302,7 @@ class VivaRealScraper(BaseScraper):
                 print(f"  → {saved} anúncios ({total_saved} total)", flush=True)
 
             # Salva progresso a cada cidade
-            self.db.save_progress(estado, last_progress)
+            self.storage.save_progress(estado, last_progress)
 
             if limit and total_saved >= limit:
                 print(f"\n[vivareal] Limite de {limit} atingido", flush=True)
@@ -263,7 +313,6 @@ class VivaRealScraper(BaseScraper):
 
     def _parse_listing(self, item: dict) -> dict | None:
         """Parse de um anúncio da API - extrai TODOS os campos disponíveis."""
-        import json as json_mod
 
         try:
             listing = item.get("listing", {})
@@ -331,9 +380,6 @@ class VivaRealScraper(BaseScraper):
             stamps_raw = listing.get("stamps", [])
             stamps_str = "|".join(stamps_raw) if stamps_raw else None
 
-            # Raw JSON completo
-            raw_json = json_mod.dumps(item, ensure_ascii=False)
-
             return {
                 "url": url,
                 "titulo": listing.get("title"),
@@ -363,7 +409,6 @@ class VivaRealScraper(BaseScraper):
                 "amenities": amenities_str,
                 "complex_amenities": complex_str,
                 "preco_por_m2": preco_por_m2,
-                "raw_json": raw_json,
                 "usage_types": "|".join(usage_types) if usage_types else None,
                 "property_sub_type": unit_types[0] if unit_types else None,
                 "andar": int(floors[0]) if floors else None,
@@ -379,6 +424,8 @@ class VivaRealScraper(BaseScraper):
                 "periodo_iptu": price_info.get("iptuPeriod"),
                 "garantias_aluguel": "|".join(warranties) if warranties else None,
                 "aluguel_total": float(aluguel_total) if aluguel_total else None,
+                "imovel_disponivel": True,
+                "imovel_atualizado": None,
             }
         except (KeyError, IndexError, TypeError, ValueError):
             return None

@@ -1,136 +1,306 @@
-# Scraper VivaReal - Imóveis Brasil
+# Scraper VivaReal — Imóveis Brasil
 
-Coleta **todos** os anúncios imobiliários de venda do VivaReal no Brasil inteiro — imóveis usados e lançamentos, todas as cidades (5.570 municípios IBGE), todos os bairros.
+Scraper que coleta **todos os anúncios de imóveis** do VivaReal em todo o Brasil, salvando os dados em formato Parquet no Amazon S3.
 
-## Abordagem técnica
+---
 
-### API interna (glue-api)
-
-Utilizamos engenharia reversa para identificar a API REST interna do VivaReal, consumida pelo próprio frontend do site:
+## Arquitetura
 
 ```
-https://glue-api.vivareal.com/v2/listings
+GitHub Actions (compute gratuito) → API VivaReal → Amazon S3 (Parquet) → Amazon Athena (consultas SQL)
 ```
 
-Essa API não é documentada publicamente. Foi descoberta inspecionando as requisições HTTP do navegador (DevTools → Network). Retorna JSON estruturado sem necessidade de autenticação — apenas requer o header `x-domain: www.vivareal.com.br` e um User-Agent de navegador.
+### Componentes
 
-### Parâmetros da API
+| Componente | Função | Custo |
+|-----------|--------|-------|
+| **GitHub Actions** | Executa o scraper automaticamente a cada 6h | Gratuito |
+| **API VivaReal** | Fonte dos dados (API interna de listagem) | Gratuito |
+| **Amazon S3** | Armazena os dados coletados em Parquet | ~$0.92/mês (32 GB) |
+| **Amazon Athena** | Consultas SQL sobre os dados no S3 | ~$0.005 por TB escaneado |
+
+**Custo total estimado: < $1/mês**
+
+---
+
+## Como funciona o scraping
+
+### Fluxo de coleta
+
+1. **Percorre todos os 27 estados** do Brasil
+2. Para cada estado, obtém **todas as cidades** via API do IBGE (ex: SP = 645 cidades)
+3. Para cada cidade, **descobre bairros** via API de locations do VivaReal (busca A-Z + termos comuns)
+4. Para cada bairro, busca **imóveis usados** + **lançamentos** (paginando até acabar)
+5. **Fallback sem bairro**: busca geral da cidade para capturar anúncios não associados a bairros conhecidos
+6. **Descoberta de bairros extras**: extrai bairros novos dos resultados do fallback e busca cada um individualmente
+7. **Remove duplicatas** por URL
+8. **Salva em Parquet** no S3 (1 arquivo por cidade)
+
+### Salvamento parcial (proteção contra perda de dados)
+
+Para cidades com muitos bairros (ex: São Paulo), o scraper salva parcialmente a cada 30 bairros processados. Se o workflow cair no meio da execução (timeout de 6h), no máximo perde os dados dos últimos 30 bairros em processamento — tudo que já foi salvo permanece no S3.
+
+### Controle de progresso
+
+A cada cidade processada, o scraper salva um arquivo de progresso no S3 (`progress/SP.json`). Na próxima execução, lê esse arquivo e continua de onde parou — não recomeça do zero.
+
+---
+
+## Estrutura dos dados no S3
 
 ```
-?addressState=São Paulo
-&addressCity=Campinas
-&addressNeighborhood=Centro
-&businessType=SALE
-&listingType=USED        (ou DEVELOPMENT para lançamentos)
-&size=24
-&from=0                  (paginação)
-&categoryPage=RESULT
+s3://scraper-imoveis-data/
+├── vivareal/
+│   ├── estado=SP/
+│   │   ├── adamantina.parquet
+│   │   ├── sao-paulo.parquet
+│   │   ├── sao-paulo_part500.parquet    (salvamento parcial)
+│   │   └── campinas.parquet
+│   ├── estado=RJ/
+│   │   ├── rio-de-janeiro.parquet
+│   │   └── niteroi.parquet
+│   └── ...
+└── progress/
+    ├── SP.json
+    ├── RJ.json
+    └── ...
 ```
 
-### Vantagens vs scraping HTML
+Particionado por estado → cidade. O Athena consegue escanear apenas o estado desejado, economizando custo.
 
-| API interna | Scraping HTML |
-|---|---|
-| Dados em JSON estruturado | Precisa parsear HTML (frágil) |
-| 24 anúncios por request | 1 anúncio por página |
-| Datas exatas (createdAt, updatedAt) | Nem sempre disponíveis |
-| Coordenadas, CEP, amenities | Dependem da estrutura do HTML |
-| Rápido (~1s por request) | Lento (~3-5s por anúncio) |
+---
 
-## Fluxo de coleta
+## Colunas coletadas (40+ campos)
 
+Cada anúncio tem as seguintes informações:
+
+### Dados do imóvel
+| Coluna | Descrição |
+|--------|-----------|
+| `tipo` | apartamento, casa, terreno, cobertura, flat, comercial, rural |
+| `area_construida` | Área útil em m² |
+| `area_terreno` | Área total do terreno em m² |
+| `quartos` | Número de quartos |
+| `suites` | Número de suítes |
+| `banheiros` | Número de banheiros |
+| `vagas` | Vagas de garagem |
+| `andar` | Andar do imóvel |
+| `total_andares` | Total de andares do prédio |
+| `amenities` | Comodidades do imóvel (piscina, churrasqueira, etc.) |
+| `complex_amenities` | Comodidades do condomínio |
+
+### Financeiro
+| Coluna | Descrição |
+|--------|-----------|
+| `preco` | Preço do imóvel |
+| `preco_condominio` | Valor mensal do condomínio |
+| `iptu` | Valor anual do IPTU |
+| `periodo_iptu` | Período do IPTU |
+| `preco_por_m2` | Preço por metro quadrado (calculado) |
+| `aluguel_total` | Valor total do aluguel |
+| `garantias_aluguel` | Garantias aceitas para aluguel |
+| `finalidade` | Venda ou aluguel |
+| `contract_type` | SALE ou RENTAL |
+
+### Localização
+| Coluna | Descrição |
+|--------|-----------|
+| `rua` | Logradouro |
+| `bairro` | Bairro |
+| `cidade` | Cidade |
+| `estado` | Estado (sigla) |
+| `cep` | CEP |
+| `zona` | Zona da cidade |
+| `latitude` | Coordenada geográfica |
+| `longitude` | Coordenada geográfica |
+
+### Descrição e mídia
+| Coluna | Descrição |
+|--------|-----------|
+| `url` | Link do anúncio |
+| `titulo` | Título |
+| `descricao` | Descrição completa |
+| `fotos_urls` | URLs de todas as fotos (separadas por \|) |
+| `image_count` | Quantidade de fotos |
+
+### Anunciante
+| Coluna | Descrição |
+|--------|-----------|
+| `anunciante_nome` | Nome da imobiliária/anunciante |
+| `anunciante_telefone` | Telefone de contato |
+
+### Metadata
+| Coluna | Descrição |
+|--------|-----------|
+| `listing_id` | ID interno do VivaReal |
+| `stamps` | Selos (destaque, super destaque, etc.) |
+| `data_publicacao` | Data de publicação do anúncio |
+| `data_ultima_atualizacao` | Última atualização |
+| `data_coleta` | Data/hora em que o scraper coletou |
+| `portal` | "vivareal" |
+| `status_anuncio` | Status (ativo, etc.) |
+| `usage_types` | Residencial, comercial, etc. |
+| `property_sub_type` | APARTMENT, HOME, LAND, etc. |
+| `aceita_permuta` | Se aceita permuta |
+| `imovel_disponivel` | Se o imóvel está disponível (True) |
+| `imovel_atualizado` | Se foi atualizado (null inicialmente) |
+
+---
+
+## Serviços AWS utilizados
+
+### Amazon S3 (Simple Storage Service)
+
+**O que é:** Armazenamento de objetos na nuvem. Funciona como um "disco infinito" onde guardamos os arquivos Parquet.
+
+**Por que usar:** 
+- Sem limite de storage (paga por GB armazenado)
+- Sem limite de processamento (não pausa por uso excessivo como o Azure SQL)
+- Durabilidade de 99.999999999% (dados praticamente impossíveis de perder)
+- Custo previsível e baixo
+
+**Preço:**
+- Storage: $0.023 por GB/mês (32 GB = $0.74/mês)
+- PUT requests: $0.005 por 1.000 requests (~$0.05/mês)
+- GET requests: $0.0004 por 1.000 requests (~$0.01/mês)
+
+### Amazon Athena (consultas SQL)
+
+**O que é:** Motor de consultas SQL serverless. Permite fazer SELECT, WHERE, GROUP BY diretamente nos arquivos Parquet do S3, sem precisar de banco de dados ligado 24h.
+
+**Por que usar:**
+- Não precisa de servidor rodando
+- Paga apenas quando consulta (por volume de dados escaneados)
+- Suporta SQL padrão
+- Lê Parquet nativamente (formato colunar = escaneia menos dados = mais barato)
+
+**Preço:**
+- $5 por TB de dados escaneados
+- Com Parquet particionado por estado, uma consulta típica escaneia ~100 MB = $0.0005
+
+**Exemplo de consulta:**
+```sql
+SELECT cidade, COUNT(*) as total, AVG(preco) as preco_medio
+FROM vivareal
+WHERE estado = 'SP' AND quartos >= 3
+GROUP BY cidade
+ORDER BY total DESC
 ```
-1. Lista IBGE → 5.570 municípios (todas as cidades do Brasil)
-   ↓
-2. Para cada cidade → descobre bairros via API de locations
-   GET glue-api.vivareal.com/v2/locations?q=A&addressState=São Paulo
-   ↓
-3. Para cada bairro → pagina anúncios (USED + DEVELOPMENT)
-   GET glue-api.vivareal.com/v2/listings?...&from=0
-   GET glue-api.vivareal.com/v2/listings?...&from=24
-   ... (até acabar)
-   ↓
-4. Fallback → busca sem bairro (pega anúncios sem bairro definido)
-   ↓
-5. JSON → extrai campos → salva no Turso
-   ↓
-6. Progresso salvo no banco a cada cidade concluída
-```
 
-## Dados coletados (todos os campos disponíveis)
+### GitHub Actions (compute)
 
-| Categoria | Campos |
-|-----------|--------|
-| Preço | preço, condomínio, IPTU, preço/m², aluguel total |
-| Características | área construída, área terreno, quartos, suítes, banheiros, vagas, tipo |
-| Localização | rua, bairro, cidade, estado, CEP, latitude, longitude, zona |
-| Temporalidade | data de publicação, data de última atualização, data de coleta |
-| Qualitativo | descrição, URLs das fotos, image_count, amenities, complex_amenities |
-| Anunciante | nome, telefone |
-| Metadata | listing_id, stamps, contract_type, usage_types, property_sub_type |
-| Estrutura | andar, total_andares, aceita_permuta, status |
-| Controle | imovel_disponivel, imovel_atualizado (preenchidos depois) |
-| Backup | raw_json (resposta completa da API) |
+**O que é:** Serviço de CI/CD do GitHub que executa código automaticamente. Funciona como um "computador na nuvem" que roda o Python do scraper.
 
-## Uso local
+**Por que usar:**
+- Gratuito para repositórios públicos (2.000 min/mês para privados)
+- Executa automaticamente via cron (a cada 6h)
+- 7 GB de RAM, 14 GB de disco
+- Timeout de 6h por job
 
+**Preço:** $0.00 (gratuito)
+
+---
+
+## Formato Parquet
+
+**O que é:** Formato de arquivo colunar e comprimido, otimizado para análise de dados.
+
+**Vantagens sobre JSON/CSV:**
+- **10-20x menor** que JSON (compressão colunar)
+- **Consultas mais rápidas** (lê só as colunas necessárias)
+- **Tipagem forte** (números são números, não strings)
+- **Suporte nativo** no Athena, Pandas, Spark, etc.
+
+**Exemplo:** 5 GB de dados em JSON → ~300-500 MB em Parquet
+
+---
+
+## Como executar
+
+### Localmente
 ```bash
 pip install -r requirements.txt
-
-# Um estado
-python main.py --estado SP
-
-# Cidade específica
-python main.py --estado SP --cidade "Campinas"
-
-# Todos os estados (Brasil inteiro)
-python main.py --all-estados
-
-# Com limite
-python main.py --estado SP --limit 100
-
-# Resetar progresso
-python main.py --all-estados --reset
+python main.py --estado SP              # Um estado
+python main.py --all-estados            # Todos os estados
+python main.py --estado SP --limit 100  # Com limite
+python main.py --all-estados --reset    # Resetar progresso
 ```
 
-## GitHub Actions (execução automática)
-
-Roda a cada 6h automaticamente. Configuração:
-1. Adicionar secrets: `TURSO_DATABASE_URL` e `TURSO_AUTH_TOKEN`
-2. Progresso salvo no banco Turso — não depende de cache do GitHub
-3. Repositório público = minutos ilimitados
-
-## Estrutura
-
+Requer variáveis de ambiente (ver `.env.example`):
 ```
-├── config/settings.py         # Configurações
-├── scrapers/
-│   ├── base.py                # Classe base (retry, rate limit)
-│   └── vivareal.py            # API VivaReal (cidades + bairros + paginação)
-├── parsers/extractor.py       # Utilitários de extração
-├── storage/database.py        # Turso HTTP API + tabela de progresso
-├── utils/
-│   ├── ibge_cidades.py        # Lista completa de municípios (API IBGE)
-│   ├── proxy_manager.py       # Proxies (opcional)
-│   └── rate_limiter.py        # Delays entre requests
-├── main.py                    # Entry point
-├── .github/workflows/         # GitHub Actions
-└── requirements.txt
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_S3_BUCKET=scraper-imoveis-data
+AWS_REGION=us-east-2
 ```
 
-## Cobertura
+### Via GitHub Actions (automático)
+- Roda automaticamente a cada 6 horas
+- Pode ser disparado manualmente em Actions → "Run workflow"
+- Suporta parâmetros: estado específico ou ALL, limite de anúncios
 
-- ✅ 27 estados
-- ✅ 5.570 municípios (lista IBGE completa)
-- ✅ Todos os bairros de cada cidade (descobertos via API)
-- ✅ Fallback sem bairro (pega anúncios sem bairro definido)
-- ✅ Imóveis usados + lançamentos
-- ✅ Apenas venda (aluguel excluído intencionalmente)
+---
 
-## Limitações
+## Secrets necessários no GitHub
 
-- API não documentada — pode mudar sem aviso
-- Cidades sem anúncios no VivaReal retornam 0 resultados (esperado)
-- Delay de 1-3s entre requests (rate limiting)
-- Limite de ~10k resultados por bairro (raro de atingir)
-- Turso free: 5GB de armazenamento
+| Secret | Valor |
+|--------|-------|
+| `AWS_ACCESS_KEY_ID` | Access key do IAM user |
+| `AWS_SECRET_ACCESS_KEY` | Secret key do IAM user |
+| `AWS_S3_BUCKET` | `scraper-imoveis-data` |
+| `AWS_REGION` | `us-east-2` |
+
+---
+
+## Estimativa de custos mensais
+
+| Serviço | Uso | Custo |
+|---------|-----|-------|
+| S3 (storage) | 32-50 GB | $0.74 - $1.15 |
+| S3 (requests) | ~20.000 PUTs | $0.10 |
+| S3 (GET requests) | ~10.000 GETs | $0.04 |
+| Athena | Consultas esporádicas | $0.01 - $0.05 |
+| GitHub Actions | Cron 4x/dia | $0.00 |
+| **Total** | — | **~$1.00/mês** |
+
+### Créditos AWS disponíveis
+
+A conta AWS possui **$100 em créditos gratuitos** (Free Tier para novos usuários), com oportunidade de ganhar mais $100 adicionais nos próximos 6 meses, totalizando até $200. Os créditos são válidos até **5 de fevereiro de 2027**.
+
+Com o custo estimado de ~$1/mês, os créditos cobrem o projeto por **mais de 6 meses sem nenhum custo real**.
+
+### Cálculo detalhado (estimativa da AWS Calculator)
+
+```
+S3 Standard storage:
+  32 GB × $0.023/GB = $0.74/mês
+
+PUT requests (upload de arquivos):
+  20.000 PUTs × $0.000005/request = $0.10/mês
+
+GET requests (leitura/consultas):
+  10.000 GETs × $0.0000004/request = $0.04/mês
+
+S3 Select (processamento):
+  8 GB × $0.0007/GB = $0.006/mês
+
+Athena (consultas SQL):
+  Preço: $5 por TB escaneado
+  Dados em Parquet (~32 GB total, particionado por estado)
+  Consulta típica filtrando 1 estado escaneia ~1-2 GB = $0.005-$0.01 por consulta
+  Estimativa: 100 consultas/mês × $0.01 = $0.10/mês
+  (Mínimo cobrado por consulta: 10 MB = $0.00005)
+
+Total mensal estimado: ~$1.00/mês (~R$ 5,50)
+Total anual estimado: ~$12.00 (~R$ 66,00)
+```
+
+---
+
+## Tecnologias
+
+- **Python 3.12**
+- **boto3** — SDK AWS para upload no S3
+- **pandas** + **pyarrow** — Conversão para Parquet
+- **requests** — Chamadas à API do VivaReal
+- **GitHub Actions** — Automação e agendamento

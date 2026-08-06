@@ -5,7 +5,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from config.settings import settings
 from utils.rate_limiter import RateLimiter
 from utils.proxy_manager import ProxyManager
-from storage.database import Database
+from storage.s3_storage import S3Storage
 
 
 class BaseScraper(ABC):
@@ -16,7 +16,7 @@ class BaseScraper(ABC):
     def __init__(self):
         self.rate_limiter = RateLimiter()
         self.proxy_manager = ProxyManager()
-        self.db = Database()
+        self.storage = S3Storage()
         self.session = requests.Session()
         self._setup_session()
 
@@ -65,65 +65,5 @@ class BaseScraper(ABC):
         pass
 
     def run(self, estado: str = "SP", cidade: str = "", limit: int = None, start_page: int = 1):
-        """Executa o scraping paginado. Retorna (saved, last_page)."""
-        from tqdm import tqdm
-
-        print(f"\n{'='*60}")
-        print(f"Iniciando scraping: {self.PORTAL_NAME}")
-        print(f"Estado: {estado} | Cidade: {cidade or 'todas'}")
-        print(f"{'='*60}\n")
-
-        total_pages = self.get_total_pages(estado, cidade)
-        if limit:
-            max_pages = min(total_pages, start_page + (limit // 20) + 1)
-        else:
-            max_pages = total_pages
-
-        print(f"[{self.PORTAL_NAME}] Páginas: {start_page} a {max_pages} (de {total_pages} total)")
-
-        saved = 0
-        errors = 0
-        consecutive_errors = 0
-        last_page = start_page
-
-        for page in tqdm(range(start_page, max_pages + 1), desc=f"[{self.PORTAL_NAME}] Páginas"):
-            try:
-                listings = self.collect_listings_page(estado, cidade, page)
-
-                if not listings:
-                    consecutive_errors += 1
-                    if consecutive_errors >= 5:
-                        print(f"\n[{self.PORTAL_NAME}] 5 páginas vazias seguidas, parando.")
-                        break
-                    continue
-
-                consecutive_errors = 0
-
-                for data in listings:
-                    if limit and saved >= limit:
-                        break
-                    data["portal"] = self.PORTAL_NAME
-                    if self.db.save_anuncio(data):
-                        saved += 1
-                    else:
-                        errors += 1
-
-                last_page = page + 1
-
-                if limit and saved >= limit:
-                    break
-
-            except Exception as e:
-                print(f"\n[{self.PORTAL_NAME}] Erro na página {page}: {e}")
-                errors += 1
-                consecutive_errors += 1
-                if consecutive_errors >= 5:
-                    print(f"\n[{self.PORTAL_NAME}] Muitos erros seguidos, parando.")
-                    break
-                continue
-
-        if last_page > max_pages:
-            last_page = -1  # concluído
-
-        print(f"\n[{self.PORTAL_NAME}] Concluído: {saved} salvos, {errors} erros")
-        return saved, last_page
+        """Executa o scraping paginado. Deve ser sobrescrito pelo scraper específico."""
+        raise NotImplementedError("Cada scraper deve implementar seu próprio run()")

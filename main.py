@@ -1,6 +1,7 @@
 """
 Scraper de Anúncios Imobiliários - VivaReal
 Coleta dados via API interna, todas as cidades e bairros do Brasil.
+Salva em Parquet no Amazon S3.
 
 Uso:
     python main.py --estado SP
@@ -10,7 +11,6 @@ Uso:
 
 import argparse
 from scrapers.vivareal import VivaRealScraper
-from storage.database import Database
 
 
 def main():
@@ -28,12 +28,12 @@ def main():
         return
 
     scraper = VivaRealScraper()
-    db = scraper.db
+    storage = scraper.storage
 
     if args.reset:
         for estado in scraper.ESTADOS.keys():
-            db.save_progress(estado, 1)
-        print("[*] Progresso resetado no banco", flush=True)
+            storage.save_progress(estado, 1)
+        print("[*] Progresso resetado", flush=True)
 
     if args.all_estados:
         estados = list(scraper.ESTADOS.keys())
@@ -43,7 +43,7 @@ def main():
     total_saved = 0
 
     for estado in estados:
-        start_page = db.get_progress(estado)
+        start_page = storage.get_progress(estado)
 
         if start_page == -1:
             print(f"[{estado}] Já concluído, pulando...", flush=True)
@@ -60,12 +60,12 @@ def main():
         )
         total_saved += saved
 
-        # Salva progresso no banco
-        db.save_progress(estado, last_page)
+        # Salva progresso
+        storage.save_progress(estado, last_page)
         print(f"[{estado}] Progresso salvo: {last_page}", flush=True)
 
     print(f"\n{'='*60}", flush=True)
-    print(f"TOTAL GERAL: {total_saved} anúncios salvos no Turso", flush=True)
+    print(f"TOTAL GERAL: {total_saved} anúncios salvos no S3", flush=True)
     print(f"{'='*60}", flush=True)
 
 

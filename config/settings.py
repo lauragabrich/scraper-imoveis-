@@ -5,11 +5,11 @@ load_dotenv()
 
 
 class Settings:
-    # Database - Azure SQL
-    AZURE_SQL_SERVER = os.getenv("AZURE_SQL_SERVER", "servidorimoveis.database.windows.net")
-    AZURE_SQL_DATABASE = os.getenv("AZURE_SQL_DATABASE", "imoveis")
-    AZURE_SQL_USER = os.getenv("AZURE_SQL_USER", "adimoveis")
-    AZURE_SQL_PASSWORD = os.getenv("AZURE_SQL_PASSWORD", "")
+    # AWS S3
+    AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
+    AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+    AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET", "scraper-imoveis-data")
+    AWS_REGION = os.getenv("AWS_REGION", "us-east-2")
 
     # Scraping
     MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", "5"))
