@@ -256,43 +256,61 @@ AWS_REGION=us-east-2
 
 | Serviço | Uso | Custo |
 |---------|-----|-------|
-| S3 (storage) | 32-50 GB | $0.74 - $1.15 |
-| S3 (requests) | ~20.000 PUTs | $0.10 |
-| S3 (GET requests) | ~10.000 GETs | $0.04 |
-| Athena | Consultas esporádicas | $0.01 - $0.05 |
+| S3 (storage) | 32 GB | $0.74/mês |
+| S3 (PUT requests) | ~6.000 PUTs | $0.03/mês |
+| S3 (GET requests) | ~100 GETs | $0.00/mês |
+| Athena | ~50 consultas/mês | $0.25/mês |
 | GitHub Actions | Cron 4x/dia | $0.00 |
-| **Total** | — | **~$1.00/mês** |
+| **Total mensal** | — | **~$0.77 - $1.02/mês** |
+| **Custo inicial (upfront)** | PUTs para subir dados | **$0.16 (uma vez)** |
 
 ### Créditos AWS disponíveis
 
-A conta AWS possui **$100 em créditos gratuitos** (Free Tier para novos usuários), com oportunidade de ganhar mais $100 adicionais nos próximos 6 meses, totalizando até $200. Os créditos são válidos até **5 de fevereiro de 2027**.
+A conta AWS possui **$100 em créditos gratuitos** (AWS Free Tier), com $0.00 usados até o momento. Os créditos são válidos até **05 de agosto de 2027** (1 ano).
 
-Com o custo estimado de ~$1/mês, os créditos cobrem o projeto por **mais de 6 meses sem nenhum custo real**.
+Serviços cobertos pelos créditos que utilizamos:
+- ✓ Amazon Simple Storage Service (S3)
+- ✓ Amazon Athena
+- ✓ AWS Lambda (se necessário no futuro)
 
-### Cálculo detalhado (estimativa da AWS Calculator)
+Com o custo estimado de ~$0.77-$1.02/mês, os $100 de crédito cobrem o projeto por **todo o período de validade** sem nenhum custo real.
+
+### Comparação de custo: Athena vs S3 Select (600 consultas/mês)
+
+| | **Athena** | **S3 Select** |
+|---|---|---|
+| **Preço** | $5 por TB escaneado | $0.002/GB escaneado + $0.0007/GB retornado |
+| **Cenário: 1 GB/consulta** | 600 × 1 GB × $0.005 = **$3.00/mês** | 600 × (1 GB × $0.002 + 0.1 GB × $0.0007) = **$1.24/mês** |
+| **Cenário: 0.2 GB/consulta** | 600 × 0.2 GB × $0.005 = **$0.60/mês** | 600 × (0.2 GB × $0.002 + 0.05 GB × $0.0007) = **$0.26/mês** |
+| **Capacidade** | SQL completo (GROUP BY, AVG, JOIN) | Filtro simples em 1 arquivo por vez |
+| **Velocidade** | 3-5 segundos | 1-2 segundos |
+
+**Conclusão:**
+- S3 Select é ~2x mais barato, mas só faz filtros simples em 1 arquivo
+- Athena é mais caro, mas faz qualquer consulta SQL em todos os dados
+- Com Parquet particionado (0.2 GB/consulta), ambos custam menos de $1/mês
 
 ```
 S3 Standard storage:
   32 GB × $0.023/GB = $0.74/mês
 
-PUT requests (upload de arquivos):
-  20.000 PUTs × $0.000005/request = $0.10/mês
+PUT, COPY, POST, LIST requests (upload de arquivos):
+  6.000 PUTs × $0.000005/request = $0.03/mês
+  (1 arquivo Parquet por cidade + arquivos de progresso)
 
-GET requests (leitura/consultas):
-  10.000 GETs × $0.0000004/request = $0.04/mês
+GET, SELECT requests (leitura):
+  100 GETs × $0.0000004/request = ~$0.00/mês
 
-S3 Select (processamento):
-  8 GB × $0.0007/GB = $0.006/mês
+S3 Select: não utilizado (consultas feitas via Athena)
 
-Athena (consultas SQL):
+Athena (consultas SQL nos dados Parquet):
   Preço: $5 por TB escaneado
-  Dados em Parquet (~32 GB total, particionado por estado)
-  Consulta típica filtrando 1 estado escaneia ~1-2 GB = $0.005-$0.01 por consulta
-  Estimativa: 100 consultas/mês × $0.01 = $0.10/mês
-  (Mínimo cobrado por consulta: 10 MB = $0.00005)
+  Consulta típica filtrando 1 estado escaneia ~1 GB = $0.005 por consulta
+  Estimativa: 50 consultas/mês × $0.005 = $0.25/mês
 
-Total mensal estimado: ~$1.00/mês (~R$ 5,50)
-Total anual estimado: ~$12.00 (~R$ 66,00)
+Custo inicial (upfront): $0.16 (PUTs para upload inicial dos dados)
+Total mensal estimado: ~$0.77-$1.02/mês (~R$ 4,20-5,60)
+Total anual estimado: ~$9.24-$12.24 (~R$ 50-67)
 ```
 
 ---
