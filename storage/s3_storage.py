@@ -33,6 +33,19 @@ class S3Storage:
             if "raw_json" in df.columns:
                 df = df.drop(columns=["raw_json"])
 
+            # Força tipos consistentes para evitar erros no Athena
+            float_cols = ["preco", "preco_condominio", "iptu", "area_construida", "area_terreno",
+                         "latitude", "longitude", "preco_por_m2", "aluguel_total"]
+            int_cols = ["quartos", "suites", "banheiros", "vagas", "image_count", "andar", "total_andares"]
+
+            for col in float_cols:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+
+            for col in int_cols:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+
             # Adiciona metadata
             df["data_coleta"] = datetime.utcnow().isoformat()
             df["portal"] = portal
