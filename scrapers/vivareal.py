@@ -296,9 +296,34 @@ class VivaRealScraper(BaseScraper):
                         anuncios.append(parsed)
 
             except Exception as e:
-                if "400" in str(e) or "429" in str(e):
+                error_str = str(e)
+                if "429" in error_str:
+                    # Rate limit: espera e tenta de novo (até 3 vezes)
+                    retried = False
+                    for retry_attempt in range(3):
+                        wait_time = 60 * (retry_attempt + 1)  # 60s, 120s, 180s
+                        print(f"    [429] Rate limit, aguardando {wait_time}s (tentativa {retry_attempt+1}/3)...", flush=True)
+                        time.sleep(wait_time)
+                        try:
+                            data = self._make_request(estado, cidade, bairro, page, listing_type=listing_type)
+                            listings = data.get("search", {}).get("result", {}).get("listings", [])
+                            if listings:
+                                for item in listings:
+                                    parsed = self._parse_listing(item)
+                                    if parsed:
+                                        parsed["portal"] = self.PORTAL_NAME
+                                        anuncios.append(parsed)
+                            retried = True
+                            break
+                        except Exception:
+                            continue
+                    if not retried:
+                        print(f"    [429] Falhou 3 vezes, pulando bairro", flush=True)
+                        break
+                elif "400" in error_str:
                     break
-                break
+                else:
+                    break
 
         return anuncios
 
