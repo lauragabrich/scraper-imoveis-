@@ -36,13 +36,62 @@ GitHub Actions (compute gratuito) → API VivaReal → Amazon S3 (Parquet) → A
 7. **Remove duplicatas** por URL
 8. **Salva em Parquet** no S3 (1 arquivo por cidade)
 
+### API utilizada
+
+O scraper usa a **API interna** do VivaReal — a mesma que o site `vivareal.com.br` utiliza para carregar anúncios no navegador. Não é uma API pública documentada.
+
+**Endpoints:**
+
+| Endpoint | Função |
+|----------|--------|
+| `https://glue-api.vivareal.com/v2/listings` | Listagem de anúncios (com filtros de estado, cidade, bairro, tipo, paginação) |
+| `https://glue-api.vivareal.com/v2/locations` | Descoberta de bairros/localizações por busca textual |
+
+**Headers obrigatórios:**
+- `x-domain: www.vivareal.com.br`
+- `User-Agent` rotativo (simula navegador)
+- `Accept: application/json`
+
+### Proteções contra bloqueio
+
+- **Rate limiting**: espera 1-3 segundos entre cada request
+- **Rotação de User-Agent**: alterna entre 5 user-agents diferentes
+- **Paginação respeitosa**: para após 2 páginas vazias consecutivas
+- **Tratamento de erro 429** (rate limit): para e pula para o próximo bairro
+
 ### Salvamento parcial (proteção contra perda de dados)
 
-Para cidades com muitos bairros (ex: São Paulo), o scraper salva parcialmente a cada 30 bairros processados. Se o workflow cair no meio da execução (timeout de 6h), no máximo perde os dados dos últimos 30 bairros em processamento — tudo que já foi salvo permanece no S3.
+Para cidades com muitos bairros (ex: São Paulo com 159+ bairros), o scraper salva parcialmente a cada 30 bairros processados — tanto na lista principal quanto no fallback. Se o workflow cair no meio da execução (timeout de 6h), no máximo perde os dados dos últimos 30 bairros em processamento — tudo que já foi salvo permanece no S3.
 
 ### Controle de progresso
 
-A cada cidade processada, o scraper salva um arquivo de progresso no S3 (`progress/SP.json`). Na próxima execução, lê esse arquivo e continua de onde parou — não recomeça do zero.
+O progresso é salvo no S3 (`progress/SP.json`) com a **lista de nomes de bairros já processados**. Na próxima execução:
+- Lê o progresso
+- Descobre os bairros da cidade
+- Pula os que já estão na lista
+- Continua apenas com os que faltam
+
+Isso garante que não importa a ordem em que a API retorna os bairros — o scraper nunca reprocessa o que já fez.
+
+```json
+{
+  "last_page": 572001,
+  "cidade_nome": "São Paulo",
+  "bairros_processados": ["Aclimação", "Alto da Lapa", "Bela Vista", ...],
+  "updated_at": "2026-08-14T..."
+}
+```
+
+### Limitações conhecidas
+
+| Limitação | Impacto | Mitigação |
+|-----------|---------|-----------|
+| API não oficial (pode mudar) | Scraper pode parar de funcionar | Monitorar execuções no GitHub Actions |
+| Só coleta imóveis à VENDA | Não pega aluguel | Pode ser adicionado com `businessType: RENTAL` |
+| Limite de ~10.000 resultados por busca | Bairros muito grandes podem perder anúncios | Busca por bairro individual reduz o problema |
+| Rate limiting da API (erro 429) | Pula bairro quando bloqueado | Espera 1-3s entre requests |
+| Timeout de 6h do GitHub Actions | Cidades grandes levam múltiplas execuções | Progresso por bairro + salvamento parcial |
+| Duplicatas possíveis entre execuções | Anúncios podem aparecer mais de uma vez | Filtrar com `SELECT DISTINCT url` no Athena |
 
 ---
 
