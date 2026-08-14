@@ -155,9 +155,10 @@ class VivaRealScraper(BaseScraper):
         anuncios.extend(self._collect_bairro_type(estado, cidade, bairro, "DEVELOPMENT", limit_pages))
         return anuncios
 
-    def scrape_cidade_completa(self, estado: str, cidade: str) -> int:
+    def scrape_cidade_completa(self, estado: str, cidade: str, start_bairro_idx: int = 0) -> int:
         """Scrape uma cidade: todos os bairros + busca sem bairro + bairros descobertos no fallback.
-        Salva parcialmente a cada 30 bairros para não perder dados."""
+        Salva parcialmente a cada 30 bairros para não perder dados.
+        Pode continuar de um bairro específico (start_bairro_idx)."""
         anuncios = []
         bairros_processados = set()
         saved_total = 0
@@ -167,14 +168,24 @@ class VivaRealScraper(BaseScraper):
 
         # Processa cada bairro encontrado, salvando parcialmente a cada 30
         if bairros:
-            for i, bairro in enumerate(bairros):
+            # Pula bairros já processados
+            if start_bairro_idx > 0:
+                print(f"  [vivareal] Continuando do bairro {start_bairro_idx}/{len(bairros)}", flush=True)
+                for skipped in bairros[:start_bairro_idx]:
+                    bairros_processados.add(skipped.lower())
+
+            for i in range(start_bairro_idx, len(bairros)):
+                bairro = bairros[i]
                 bairros_processados.add(bairro.lower())
                 anuncios.extend(self._collect_bairro(estado, cidade, bairro))
 
                 # Salvamento parcial a cada 30 bairros
-                if (i + 1) % 30 == 0 and anuncios:
+                if (i + 1 - start_bairro_idx) % 30 == 0 and anuncios:
                     saved_total += self._save_partial(anuncios, estado, cidade, saved_total)
                     anuncios = []
+                    # Salva progresso com bairro atual
+                    cidade_idx = self._get_cidade_idx(estado, cidade)
+                    self.storage.save_progress(estado, cidade_idx * 1000 + 1, cidade_nome=cidade, bairro_idx=i + 1)
 
         # Fallback: busca sem bairro e descobre bairros que escaparam
         fallback_anuncios = self._collect_bairro(estado, cidade, "")
@@ -200,6 +211,15 @@ class VivaRealScraper(BaseScraper):
             saved_total += self._save_partial(anuncios, estado, cidade, saved_total)
 
         return saved_total
+
+    def _get_cidade_idx(self, estado: str, cidade: str) -> int:
+        """Retorna o índice da cidade na lista do IBGE."""
+        from utils.ibge_cidades import get_cidades_estado
+        cidades = get_cidades_estado(estado)
+        try:
+            return cidades.index(cidade)
+        except ValueError:
+            return 0
 
     def _save_partial(self, anuncios: list[dict], estado: str, cidade: str, offset: int) -> int:
         """Salva lote parcial no S3, removendo duplicatas. Retorna quantidade salva."""
@@ -261,7 +281,7 @@ class VivaRealScraper(BaseScraper):
 
         return anuncios
 
-    def run(self, estado: str = "SP", cidade: str = "", limit: int = None, start_page: int = 1):
+    def run(self, estado: str = "SP", cidade: str = "", limit: int = None, start_page: int = 1, start_bairro_idx: int = 0):
         """Executa scraping por cidade e bairro. Retorna (saved, last_index)."""
 
         print(f"\n{'='*60}", flush=True)
@@ -294,15 +314,21 @@ class VivaRealScraper(BaseScraper):
             cidade_nome = cidades[cidade_idx]
             print(f"\n[{estado}] Cidade {cidade_idx+1}/{len(cidades)}: {cidade_nome}", flush=True)
 
-            saved = self.scrape_cidade_completa(estado, cidade_nome)
+            # Se é a cidade onde parou, passa o bairro_idx para continuar
+            current_bairro_idx = start_bairro_idx if cidade_idx == start_cidade_idx else 0
+
+            saved = self.scrape_cidade_completa(estado, cidade_nome, start_bairro_idx=current_bairro_idx)
             total_saved += saved
             last_progress = (cidade_idx + 1) * 1000 + 1
 
             if saved > 0:
                 print(f"  → {saved} anúncios ({total_saved} total)", flush=True)
 
-            # Salva progresso a cada cidade
-            self.storage.save_progress(estado, last_progress)
+            # Salva progresso a cada cidade (bairro_idx=0 porque terminou a cidade)
+            self.storage.save_progress(estado, last_progress, cidade_nome="", bairro_idx=0)
+
+            # Reseta start_bairro_idx após a primeira cidade
+            start_bairro_idx = 0
 
             if limit and total_saved >= limit:
                 print(f"\n[vivareal] Limite de {limit} atingido", flush=True)

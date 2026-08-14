@@ -32,7 +32,7 @@ def main():
 
     if args.reset:
         for estado in scraper.ESTADOS.keys():
-            storage.save_progress(estado, 1)
+            storage.save_progress(estado, 1, cidade_nome="", bairro_idx=0)
         print("[*] Progresso resetado", flush=True)
 
     if args.all_estados:
@@ -43,7 +43,8 @@ def main():
     total_saved = 0
 
     for estado in estados:
-        start_page = storage.get_progress(estado)
+        progress = storage.get_progress(estado)
+        start_page = progress.get("last_page", 1)
 
         if start_page == -1:
             print(f"[{estado}] Já concluído, pulando...", flush=True)
@@ -57,6 +58,7 @@ def main():
             cidade=args.cidade,
             limit=args.limit,
             start_page=start_page,
+            start_bairro_idx=progress.get("bairro_idx", 0),
         )
         total_saved += saved
 
