@@ -161,7 +161,8 @@ class VivaRealScraper(BaseScraper):
         Pode continuar de um bairro específico (start_bairro_idx)."""
         anuncios = []
         bairros_processados = set()
-        saved_total = 0
+        # Se estamos continuando, começa offset com valor alto para não sobrescrever arquivos existentes
+        saved_total = start_bairro_idx * 100 if start_bairro_idx > 0 else 0
 
         # Descobre bairros via API de locations
         bairros = self.discover_bairros(estado, cidade)
