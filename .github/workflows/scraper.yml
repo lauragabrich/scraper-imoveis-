@@ -4,51 +4,124 @@ on:
   schedule:
     - cron: '0 */6 * * *'
   workflow_dispatch:
-    inputs:
-      estado:
-        description: 'Estado (ex: SP, RJ, MG ou ALL)'
-        required: false
-        default: 'ALL'
-      limit:
-        description: 'Limite de anúncios (vazio = sem limite)'
-        required: false
-        default: ''
+
+env:
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+  AWS_REGION: ${{ secrets.AWS_REGION }}
 
 jobs:
-  scrape:
+  sp:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     concurrency:
-      group: scraper-vivareal
+      group: scraper-sp
       cancel-in-progress: false
-
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
       - run: pip install -r requirements.txt
+      - name: Scrape SP
+        run: python main.py --estado SP
 
-      - name: Rodar scraper
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
+  rj:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    concurrency:
+      group: scraper-rj
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Scrape RJ
+        run: python main.py --estado RJ
+
+  mg:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    concurrency:
+      group: scraper-mg
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Scrape MG
+        run: python main.py --estado MG
+
+  sul:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    concurrency:
+      group: scraper-sul
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Scrape Sul
         run: |
-          ESTADO="${{ github.event.inputs.estado || 'ALL' }}"
-          LIMIT="${{ github.event.inputs.limit }}"
+          python main.py --estado PR
+          python main.py --estado RS
+          python main.py --estado SC
 
-          if [ "$ESTADO" = "ALL" ]; then
-            CMD="python main.py --all-estados"
-          else
-            CMD="python main.py --estado $ESTADO"
-          fi
+  nordeste-norte:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    concurrency:
+      group: scraper-nordeste-norte
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Scrape Nordeste e Norte
+        run: |
+          python main.py --estado BA
+          python main.py --estado PE
+          python main.py --estado CE
+          python main.py --estado PA
+          python main.py --estado AM
+          python main.py --estado MA
 
-          if [ -n "$LIMIT" ]; then
-            CMD="$CMD --limit $LIMIT"
-          fi
-
-          echo "Executando: $CMD"
-          $CMD
+  centro-outros:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    concurrency:
+      group: scraper-centro-outros
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Scrape Centro-Oeste e outros
+        run: |
+          python main.py --estado GO
+          python main.py --estado DF
+          python main.py --estado ES
+          python main.py --estado MT
+          python main.py --estado MS
+          python main.py --estado PB
+          python main.py --estado RN
+          python main.py --estado AL
+          python main.py --estado PI
+          python main.py --estado SE
+          python main.py --estado TO
+          python main.py --estado RO
+          python main.py --estado AC
+          python main.py --estado AP
+          python main.py --estado RR
