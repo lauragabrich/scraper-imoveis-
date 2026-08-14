@@ -32,7 +32,7 @@ def main():
 
     if args.reset:
         for estado in scraper.ESTADOS.keys():
-            storage.save_progress(estado, 1, cidade_nome="", bairro_idx=0)
+            storage.save_progress(estado, 1, cidade_nome="", bairros_processados=[])
         print("[*] Progresso resetado", flush=True)
 
     if args.all_estados:
@@ -58,7 +58,7 @@ def main():
             cidade=args.cidade,
             limit=args.limit,
             start_page=start_page,
-            start_bairro_idx=progress.get("bairro_idx", 0),
+            bairros_ja_processados=progress.get("bairros_processados", []),
         )
         total_saved += saved
 

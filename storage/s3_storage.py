@@ -78,35 +78,35 @@ class S3Storage:
             print(f"  [S3] Erro ao salvar: {e}", flush=True)
             return False
 
-    def save_progress(self, estado: str, last_page: int, cidade_nome: str = "", bairro_idx: int = 0):
-        """Salva progresso como JSON no S3 (cidade + bairro para granularidade fina)."""
+    def save_progress(self, estado: str, last_page: int, cidade_nome: str = "", bairros_processados: list = None):
+        """Salva progresso como JSON no S3 (com lista de bairros já processados)."""
         try:
             progress = {
                 "estado": estado,
                 "last_page": last_page,
                 "cidade_nome": cidade_nome,
-                "bairro_idx": bairro_idx,
+                "bairros_processados": bairros_processados or [],
                 "updated_at": datetime.utcnow().isoformat(),
             }
             s3_key = f"progress/{estado}.json"
             self.s3.put_object(
                 Bucket=self.bucket,
                 Key=s3_key,
-                Body=json.dumps(progress),
+                Body=json.dumps(progress, ensure_ascii=False),
                 ContentType="application/json",
             )
         except Exception as e:
             print(f"  [S3] Erro ao salvar progresso: {e}", flush=True)
 
     def get_progress(self, estado: str) -> dict:
-        """Retorna progresso completo (last_page, cidade_nome, bairro_idx)."""
+        """Retorna progresso completo."""
         try:
             s3_key = f"progress/{estado}.json"
             response = self.s3.get_object(Bucket=self.bucket, Key=s3_key)
             data = json.loads(response["Body"].read())
             return data
         except Exception:
-            return {"last_page": 1, "cidade_nome": "", "bairro_idx": 0}
+            return {"last_page": 1, "cidade_nome": "", "bairros_processados": []}
 
     def _slugify(self, text: str) -> str:
         """Converte texto para slug (sem acentos, lowercase, hífens)."""
