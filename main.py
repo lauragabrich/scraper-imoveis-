@@ -12,6 +12,7 @@ Uso:
 """
 
 import argparse
+import sys
 
 PORTAIS = ["vivareal", "lugarcerto", "imovelweb"]
 
@@ -79,13 +80,20 @@ def main():
         scraper.storage.coleta_atual(args.portal, nova=True)
 
     total_saved = 0
+    incompletos = []
     for estado in estados:
-        saved, _ = scraper.run(estado=estado, cidade=args.cidade, limit=args.limit, reset=args.reset)
+        saved, fim = scraper.run(estado=estado, cidade=args.cidade, limit=args.limit, reset=args.reset)
         total_saved += saved
+        if fim != -1:
+            incompletos.append(estado)
 
     print(f"\n{'='*60}", flush=True)
     print(f"TOTAL GERAL ({args.portal}): {total_saved} anúncios salvos no S3", flush=True)
+    if incompletos:
+        print(f"Pendentes (rodar de novo para continuar): {', '.join(incompletos)}", flush=True)
     print(f"{'='*60}", flush=True)
+    # Código 2 = ainda há estados pendentes (quem chama, ex. tools/rodar_imovelweb.ps1, repete)
+    sys.exit(2 if incompletos else 0)
 
 
 if __name__ == "__main__":

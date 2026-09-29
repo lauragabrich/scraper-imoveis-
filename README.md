@@ -41,7 +41,7 @@ Outras correções em relação à coleta antiga:
 ```bash
 python main.py --portal lugarcerto --all-estados              # ~75 mil anúncios
 python main.py --portal lugarcerto --estado MG --sem-detalhes # só listagem (rápido)
-python main.py --portal imovelweb --estado SP --workers 8 --passadas 2
+python main.py --portal imovelweb --estado SP --workers 12 --passadas 2   # no seu computador (ver abaixo)
 ```
 
 | | Lugar Certo | Imovelweb |
@@ -53,7 +53,7 @@ python main.py --portal imovelweb --estado SP --workers 8 --passadas 2
 | **Segmentação** | estado → cidade → bairro (cidades > 10 mil) | estado × venda/aluguel × faixa de preço, dividida ao meio até ≤ 29 mil; se um preço único passa disso (ex.: ~35 mil anúncios a R$ 350.000 em SP), divide também por área útil |
 | **Cobertura medida** | 100% (DF), 99,97% (BH) | ~97% com 1 passada, ~100% com `--passadas 2` |
 | **Tempo estimado** | minutos (listagem) + ~15 h (detalhes, 4 workers) | SP: ~2 dias em 4 jobs (listagem + página de cada anúncio, 12 workers, 2 passadas); demais estados em paralelo, <1 dia cada |
-| **Workflow** | `scraper-lugarcerto.yml` | `scraper-imovelweb.yml` |
+| **Onde roda** | GitHub Actions (`scraper-lugarcerto.yml`) | **No seu computador** (`tools/rodar_imovelweb.ps1`): o Cloudflare bloqueia os IPs do GitHub |
 
 **Detalhes técnicos que importam:**
 - **Lugar Certo:** a listagem não traz lat/lng, CEP, condomínio, IPTU, fotos, suítes nem telefone. Esses campos vêm da página de cada anúncio (`window.detalheanuncio`), o que é o passo demorado; `--sem-detalhes` pula esse passo. Não use `sort=menorpreco`: ele adiciona um filtro escondido que exclui anúncios sem preço. Em estados sem anúncios o filtro de estado é ignorado e a API devolve o Brasil inteiro, por isso os registros são validados por UF e cidade.
@@ -467,8 +467,18 @@ AWS_S3_BUCKET=scraper-imoveis-data
 AWS_REGION=us-east-2
 ```
 
+### Imovelweb (no seu computador)
+
+No PowerShell, dentro da pasta `scraper-imoveis` (precisa do `.env` com as credenciais da AWS):
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass   # só se o Windows bloquear o script
+.	oolsodar_imovelweb.ps1
+```
+O script coleta todos os estados e repete sozinho até terminar. Pode fechar a janela ou reiniciar o computador: ao rodar de novo, continua de onde parou (progresso em `progress/imovelweb/` no S3). Deixe o Windows sem suspender enquanto roda (Configurações → Sistema → Energia → "Suspender: Nunca"). Ele troca de identidade de navegador sozinho quando o Cloudflare responde 403.
+
 ### Via GitHub Actions (automático)
-- Três workflows (`scraper.yml` = VivaReal, `scraper-lugarcerto.yml`, `scraper-imovelweb.yml`), cada um rodando a cada 6 horas e continuando de onde parou; estados concluídos são pulados
+- Dois workflows (`scraper.yml` = VivaReal, `scraper-lugarcerto.yml`), cada um rodando a cada 6 horas e continuando de onde parou; estados concluídos são pulados
+- O **Imovelweb não roda no GitHub**: o Cloudflare dele bloqueia os IPs de datacenter (testado com 12 identidades de navegador pelo workflow manual `diagnostico-imovelweb.yml`, todas com 403). Ele roda no seu computador — ver abaixo
 - Para uma **nova coleta**, dispare manualmente em Actions → "Run workflow" com **reset** marcado
 - Juntos somam ~23 jobs; o plano gratuito roda 20 ao mesmo tempo e o resto espera na fila
 

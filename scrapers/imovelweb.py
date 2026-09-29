@@ -67,6 +67,11 @@ class ImovelwebScraper(BaseScraper):
 
     ORDENACOES = ["low_price", "more_recent", "high_price"]
 
+    # Identidades de navegador (curl_cffi) que passaram pelo Cloudflare num IP residencial
+    # em set/2026. De IP de datacenter (ex.: runners do GitHub, Microsoft AS8075) todas
+    # levam 403 — por isso o Imovelweb roda num computador comum (tools/rodar_imovelweb.ps1).
+    IDENTIDADES = ["chrome", "chrome150", "safari2601", "firefox147", "tor145"]
+
     CORPO_BASE = {
         "q": None, "direccion": None, "moneda": None, "preciomin": None, "preciomax": None,
         "services": "", "general": "", "searchbykeyword": "", "amenidades": "",
@@ -113,6 +118,8 @@ class ImovelwebScraper(BaseScraper):
         # pertence a uma parte (crc32 da chave); progresso separado por parte
         self.parte, self.partes = parte, partes
         self._local = threading.local()
+        self._lock_identidade = threading.Lock()
+        self._proxima_identidade = random.randrange(len(self.IDENTIDADES))
         self._divididos = set()  # chaves de segmentos já subdivididos (vem do progresso)
         self._folhas = set()     # chaves de segmentos finais já conhecidos (vem do progresso)
         self._falhas = 0
@@ -126,8 +133,12 @@ class ImovelwebScraper(BaseScraper):
     # ------------------------------------------------------------------ HTTP
 
     def _nova_sessao(self):
-        """Sessão com fingerprint TLS do Chrome + cookie __cf_bm obtido numa página comum."""
-        s = cffi_requests.Session(impersonate="chrome")
+        """Sessão com fingerprint TLS de um navegador + cookie __cf_bm de uma página comum.
+        Cada sessão nova usa a próxima identidade da lista (rodízio)."""
+        with self._lock_identidade:
+            identidade = self.IDENTIDADES[self._proxima_identidade % len(self.IDENTIDADES)]
+            self._proxima_identidade += 1
+        s = cffi_requests.Session(impersonate=identidade)
         try:
             s.get(f"{self.BASE_URL}/imoveis-venda.html", timeout=40)
         except Exception:
@@ -139,25 +150,38 @@ class ImovelwebScraper(BaseScraper):
             self._local.session = self._nova_sessao()
         return self._local.session
 
+    def _espera_apos(self, status: int | None, tentativa: int) -> int:
+        """403 do Cloudflare costuma ser da identidade de navegador: troca logo de
+        identidade (espera curta) e só espera muito depois de passar por todas."""
+        if status == 403 and tentativa < len(self.IDENTIDADES):
+            return 3
+        if status in (403, 429):
+            return 60 * (tentativa - len(self.IDENTIDADES) + 1)
+        return 10 * (tentativa + 1)
+
     def _post(self, corpo: dict) -> dict | None:
-        """POST na API com retry. 403/429 renovam a sessão e esperam cada vez mais."""
+        """POST na API com retry. 403/429 trocam de identidade/sessão e esperam."""
         headers = {
             "Content-Type": "application/json",
             "X-Requested-With": "XMLHttpRequest",
             "Origin": self.BASE_URL,
             "Referer": f"{self.BASE_URL}/imoveis-venda.html",
         }
-        for tentativa in range(5):
+        tentativas = len(self.IDENTIDADES) + 3
+        for tentativa in range(tentativas):
             time.sleep(random.uniform(settings.REQUEST_DELAY_MIN / 2, settings.REQUEST_DELAY_MAX / 2))
+            status = None
             try:
                 r = self._sessao().post(self.API_URL, json=corpo, headers=headers, timeout=60)
                 if r.status_code == 200:
                     return r.json()
-                espera = 60 * (tentativa + 1) if r.status_code in (403, 429) else 10 * (tentativa + 1)
-                print(f"    [imovelweb] HTTP {r.status_code}, aguardando {espera}s "
-                      f"(tentativa {tentativa + 1}/5)", flush=True)
+                status = r.status_code
+                espera = self._espera_apos(status, tentativa)
+                if espera > 3:
+                    print(f"    [imovelweb] HTTP {status}, aguardando {espera}s "
+                          f"(tentativa {tentativa + 1}/{tentativas})", flush=True)
             except Exception as e:
-                espera = 10 * (tentativa + 1)
+                espera = self._espera_apos(None, tentativa)
                 print(f"    [imovelweb] {type(e).__name__}, aguardando {espera}s", flush=True)
             time.sleep(espera)
             self._sessao(renovar=True)
@@ -171,7 +195,7 @@ class ImovelwebScraper(BaseScraper):
             url = self.BASE_URL + url
         if not url:
             return None
-        for tentativa in range(3):
+        for tentativa in range(len(self.IDENTIDADES) + 1):
             time.sleep(random.uniform(settings.REQUEST_DELAY_MIN / 4, settings.REQUEST_DELAY_MAX / 4))
             try:
                 r = self._sessao().get(url, timeout=60)
@@ -179,9 +203,9 @@ class ImovelwebScraper(BaseScraper):
                     return None  # anúncio saiu do ar entre a listagem e o detalhe
                 if r.status_code == 200:
                     return self._extrair_detalhe(r.text)
-                espera = 60 * (tentativa + 1) if r.status_code in (403, 429) else 10 * (tentativa + 1)
+                espera = self._espera_apos(r.status_code, tentativa)
             except Exception:
-                espera = 10 * (tentativa + 1)
+                espera = self._espera_apos(None, tentativa)
             time.sleep(espera)
             self._sessao(renovar=True)
         return None
