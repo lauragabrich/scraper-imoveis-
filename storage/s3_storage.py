@@ -7,6 +7,24 @@ from datetime import datetime
 from config.settings import settings
 
 
+def corrigir_coordenadas(df: pd.DataFrame) -> int:
+    """Anunciantes às vezes invertem latitude e longitude (ex.: Camaçari com lat -38,13 e
+    lon -12,69). Se o par está fora do Brasil mas invertido cai dentro, desinverte.
+    Retorna quantas linhas foram corrigidas."""
+    if "latitude" not in df.columns or "longitude" not in df.columns:
+        return 0
+    lat = pd.to_numeric(df["latitude"], errors="coerce")
+    lon = pd.to_numeric(df["longitude"], errors="coerce")
+
+    def no_brasil(la, lo):
+        return la.between(-34, 6) & lo.between(-75, -32)
+
+    trocar = ~no_brasil(lat, lon) & no_brasil(lon, lat)
+    if trocar.any():
+        df.loc[trocar, "latitude"], df.loc[trocar, "longitude"] = lon[trocar], lat[trocar]
+    return int(trocar.sum())
+
+
 class S3Storage:
     """Gerencia upload de dados para o S3 em formato Parquet."""
 
@@ -81,6 +99,8 @@ class S3Storage:
             for col in bool_cols:
                 if col in df.columns:
                     df[col] = df[col].astype("boolean")
+
+            corrigir_coordenadas(df)
 
             # Demais colunas: sempre string. Evita (1) coluna toda nula gravada com tipo
             # "null" e (2) valores mistos (ex.: código 439851 numérico num anúncio e

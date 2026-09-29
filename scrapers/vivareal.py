@@ -623,13 +623,23 @@ class VivaRealScraper(BaseScraper):
         except (TypeError, ValueError):
             return None
 
+    # unitTypes do VivaReal -> categorias comuns aos 3 portais
+    # (apartamento, casa, cobertura, flat, terreno, comercial, rural)
+    TIPOS = {
+        "APARTMENT": "apartamento", "KITNET": "apartamento",
+        "PENTHOUSE": "cobertura", "FLAT": "flat",
+        "HOME": "casa", "CONDOMINIUM": "casa", "TWO_STORY_HOUSE": "casa", "VILLAGE_HOUSE": "casa",
+        "LAND": "terreno", "ALLOTMENT_LAND": "terreno", "RESIDENTIAL_ALLOTMENT_LAND": "terreno",
+        "COMMERCIAL_ALLOTMENT_LAND": "terreno",
+        "FARM": "rural",
+        "COMMERCIAL": "comercial", "OFFICE": "comercial", "BUSINESS": "comercial",
+        "COMMERCIAL_PROPERTY": "comercial", "COMMERCIAL_BUILDING": "comercial", "BUILDING": "comercial",
+        "RESIDENTIAL_BUILDING": "comercial", "SHED_DEPOSIT_WAREHOUSE": "comercial",
+        "PARKING_SPACE": "comercial", "HOTEL": "comercial", "CLINIC": "comercial", "STORE": "comercial",
+    }
+
     def _map_tipo(self, unit_type: str) -> str | None:
+        """Tipo padronizado. O original fica em property_sub_type."""
         if not unit_type:
             return None
-        mapping = {
-            "APARTMENT": "apartamento", "HOME": "casa",
-            "CONDOMINIUM": "casa", "LAND": "terreno",
-            "PENTHOUSE": "cobertura", "FLAT": "flat",
-            "COMMERCIAL": "comercial", "FARM": "rural",
-        }
-        return mapping.get(unit_type.upper(), unit_type.lower())
+        return self.TIPOS.get(unit_type.upper(), unit_type.lower())
