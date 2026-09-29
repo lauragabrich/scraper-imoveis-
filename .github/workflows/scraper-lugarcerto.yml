@@ -51,3 +51,30 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Scrape demais estados
         run: python main.py --portal lugarcerto --estado GO,SP,RJ,ES,PE,DF,AM,PR,RS,CE,AL,BA,SC,MA,PB,MS,TO,RN,SE,PA,MT,AC,AP,PI,RO,RR --workers 4 $RESET_FLAG
+
+  # Ao fim de cada ciclo (~6h), se algum job não concluiu, dispara o próximo ciclo na
+  # hora: não depende do agendamento do GitHub, que às vezes não dispara (em 29/09 o
+  # VivaReal ficou horas parado assim). Trava: se o ciclo durou menos de 30 min (erro
+  # rápido), não redispara, para não virar loop.
+  # Para PARAR a coleta, desative o workflow (Actions -> ... -> Disable workflow);
+  # cancelar a execução não basta, porque este passo dispara a próxima.
+  continuar:
+    needs: [mg, outros]
+    if: always() && (needs.mg.result != 'success' || needs.outros.result != 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Disparar o próximo ciclo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          inicio=$(gh run view "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --json createdAt -q .createdAt)
+          minutos=$(( ( $(date +%s) - $(date -d "$inicio" +%s) ) / 60 ))
+          if [ "$minutos" -lt 30 ]; then
+            echo "Ciclo durou só $minutos min: não redispara (veja os logs dos jobs)."
+            exit 0
+          fi
+          gh workflow run scraper-lugarcerto.yml --repo "$GITHUB_REPOSITORY" --ref main
+          echo "Próximo ciclo disparado."
