@@ -1,0 +1,19 @@
+name: Diagnóstico Imovelweb
+
+# Só roda manualmente. Testa se o Cloudflare do Imovelweb deixa passar a máquina do
+# GitHub com diferentes identidades de navegador. Não grava nada no S3.
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnostico:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Testar acesso ao Imovelweb
+        run: python tools/diagnostico_imovelweb.py
