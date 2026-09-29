@@ -2,7 +2,10 @@ name: Scraper Lugar Certo
 
 on:
   schedule:
-    - cron: '0 */6 * * *'   # continua de onde parou; estados concluídos são pulados
+    # De hora em hora: o GitHub não garante o horário e às vezes pula execuções agendadas.
+    # Se o job anterior ainda roda, o novo espera na fila (concurrency) e começa quando ele
+    # termina; estados já concluídos terminam em segundos.
+    - cron: '17 * * * *'
   workflow_dispatch:
     inputs:
       reset:

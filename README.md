@@ -50,7 +50,7 @@ python main.py --portal imovelweb --estado SP --workers 12 --passadas 2   # no s
 | **Fonte** | Endpoint JSON da busca `/busca/dasearch` | API interna `POST /rplis-api/postings` |
 | **Proteção** | Nenhuma | Cloudflare: exige `curl_cffi` (fingerprint TLS do Chrome) |
 | **Limite por consulta** | 10.000 por chamada | 30 por página, máx. 1000 páginas (30 mil) |
-| **Segmentação** | estado → cidade → bairro (cidades > 10 mil) | estado × venda/aluguel × faixa de preço, dividida ao meio até ≤ 29 mil; se um preço único passa disso (ex.: ~35 mil anúncios a R$ 350.000 em SP), divide também por área útil |
+| **Segmentação** | estado → cidade → bairro (cidades > 10 mil) | estado × venda/aluguel × faixa de preço, dividida ao meio até ≤ 4.800 (a API só mantém a ordenação nos primeiros ~5.000 resultados de cada consulta; além disso embaralha); se um preço único passa disso (ex.: ~35 mil anúncios a R$ 350.000 em SP), divide também por área útil |
 | **Cobertura medida** | 100% (DF), 99,97% (BH) | ~97% com 1 passada, ~100% com `--passadas 2` |
 | **Tempo estimado** | minutos (listagem) + ~15 h (detalhes, 4 workers) | SP: ~2 dias em 4 jobs (listagem + página de cada anúncio, 12 workers, 2 passadas); demais estados em paralelo, <1 dia cada |
 | **Onde roda** | GitHub Actions (`scraper-lugarcerto.yml`) | **No seu computador** (`tools/rodar_imovelweb.ps1`): o Cloudflare bloqueia os IPs do GitHub |

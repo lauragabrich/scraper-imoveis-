@@ -9,7 +9,8 @@ O site fica atrás do Cloudflare:
 Por isso a coleta usa a API interna que o próprio site chama no navegador:
     POST https://www.imovelweb.com.br/rplis-api/postings
 Ela aceita páginas profundas, mas tem limites:
-  - 30 anúncios por página (fixo) e no máximo 1000 páginas por consulta (30.000);
+  - 30 anúncios por página (fixo); aceita até 1000 páginas, mas a ordenação só vale nos
+    primeiros ~5.000 resultados (ver LIMITE_FAIXA);
   - a ordenação desempata de forma aleatória a cada requisição, então paginar uma
     consulta perde ~3% dos anúncios (aparecem duplicados no lugar). Uma segunda
     passada com outra ordenação (--passadas 2) recupera a maior parte.
@@ -44,8 +45,13 @@ class ImovelwebScraper(BaseScraper):
     BASE_URL = "https://www.imovelweb.com.br"
     API_URL = "https://www.imovelweb.com.br/rplis-api/postings"
     POR_PAGINA = 30
-    MAX_PAGINAS = 1000
-    LIMITE_FAIXA = 29000  # folga abaixo de 30.000 (o total muda durante a coleta)
+    # A API aceita até a página 1000, mas só mantém a ORDENAÇÃO nos primeiros ~5.000
+    # resultados (página 166 ordenada, 169 já embaralhada — medido em set/2026). Além
+    # disso cada página vem de um embaralhamento diferente e paginar vira sorteio com
+    # repetição (fatias de 29 mil ficavam com ~80% de cobertura). Por isso as fatias
+    # são divididas até caberem nesse trecho ordenado.
+    MAX_PAGINAS = 166
+    LIMITE_FAIXA = 4800  # folga abaixo de 5.000 (o total muda durante a coleta)
 
     # IDs de "province" do Imovelweb
     PROVINCIAS = {

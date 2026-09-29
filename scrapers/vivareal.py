@@ -626,7 +626,7 @@ class VivaRealScraper(BaseScraper):
     # unitTypes do VivaReal -> categorias comuns aos 3 portais
     # (apartamento, casa, cobertura, flat, terreno, comercial, rural)
     TIPOS = {
-        "APARTMENT": "apartamento", "KITNET": "apartamento",
+        "APARTMENT": "apartamento", "KITNET": "apartamento", "LOFT": "apartamento",
         "PENTHOUSE": "cobertura", "FLAT": "flat",
         "HOME": "casa", "CONDOMINIUM": "casa", "TWO_STORY_HOUSE": "casa", "VILLAGE_HOUSE": "casa",
         "LAND": "terreno", "ALLOTMENT_LAND": "terreno", "RESIDENTIAL_ALLOTMENT_LAND": "terreno",
