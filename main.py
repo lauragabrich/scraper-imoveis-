@@ -39,7 +39,7 @@ def criar_scraper(args):
         return LugarCertoScraper(detalhes=detalhes, workers=args.workers)
     from scrapers.imovelweb import ImovelwebScraper
     return ImovelwebScraper(workers=args.workers, passadas=args.passadas,
-                            detalhes=detalhes, parte=parte, partes=partes)
+                            detalhes=detalhes, parte=parte, partes=partes, complementar=args.complementar)
 
 
 def main():
@@ -61,6 +61,9 @@ def main():
                              "por >1h a ~10 req/s)")
     parser.add_argument("--parte", type=parse_parte, default=(1, 1), metavar="N/M",
                         help="VivaReal/Imovelweb: divide o estado em M jobs e roda a parte N (ex.: 2/4)")
+    parser.add_argument("--complementar", action="store_true",
+                        help="Imovelweb: recoleta os estados pedidos e grava só os anúncios que ainda não "
+                             "estão no S3 (nada é apagado nem sobrescrito)")
     parser.add_argument("--passadas", type=int, default=1,
                         help="Imovelweb: 2 = segunda passada com outra ordenação (+~3%% de cobertura, 2x requisições)")
 

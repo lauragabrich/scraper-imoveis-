@@ -111,7 +111,7 @@ class ImovelwebScraper(BaseScraper):
     }
 
     def __init__(self, workers: int = 4, passadas: int = 1, detalhes: bool = True,
-                 parte: int = 1, partes: int = 1):
+                 parte: int = 1, partes: int = 1, complementar: bool = False):
         if cffi_requests is None:
             raise RuntimeError("Imovelweb requer curl_cffi: pip install curl_cffi")
         super().__init__()
@@ -123,6 +123,10 @@ class ImovelwebScraper(BaseScraper):
         # Divisão de um estado em N jobs (--parte 2/4): cada segmento de preço/área
         # pertence a uma parte (crc32 da chave); progresso separado por parte
         self.parte, self.partes = parte, partes
+        # Modo complementar: refaz a segmentação de um estado já coletado e grava só os
+        # anúncios que ainda não estão no S3 (usado para completar os estados coletados
+        # antes da correção do limite de ~5.000 resultados ordenados)
+        self.complementar = complementar
         self._local = threading.local()
         self._lock_identidade = threading.Lock()
         self._proxima_identidade = random.randrange(len(self.IDENTIDADES))
@@ -366,6 +370,12 @@ class ImovelwebScraper(BaseScraper):
             return 0, -1
 
         chave_prog = self._chave_progresso(estado)
+        chave_principal = chave_prog
+        existentes = set()
+        if self.complementar:
+            chave_prog += "_complemento"
+            existentes = self._ids_existentes(estado)
+            print(f"[imovelweb] {estado}: modo complementar, {len(existentes)} anúncios já no S3", flush=True)
         progress = {} if reset else self.storage.get_portal_progress(self.PORTAL_NAME, chave_prog)
         if progress.get("concluido"):
             print(f"[imovelweb] {chave_prog} já concluído, pulando (use --reset para refazer)", flush=True)
@@ -403,6 +413,11 @@ class ImovelwebScraper(BaseScraper):
                     self._falhas += 1
                     continue
 
+                coletados = len(brutos)
+                if self.complementar:
+                    # Só o que ainda não está no S3 (mesmo anúncio e mesma operação)
+                    brutos = {pid: p for pid, p in brutos.items() if (str(pid), operacao) not in existentes}
+
                 detalhes = {}
                 if self.detalhes and brutos:
                     postings = list(brutos.values())
@@ -418,14 +433,18 @@ class ImovelwebScraper(BaseScraper):
                     print(f"  [imovelweb] AVISO: {len(brutos) - len(anuncios)} anúncios descartados "
                           f"por erro de parse em {chave}", flush=True)
 
-                cobertura = 100 * len(brutos) / total if total else 100
-                print(f"  [{estado}] {chave}: {len(brutos)}/{total} anúncios "
-                      f"({cobertura:.1f}%) em {time.time() - t0:.0f}s", flush=True)
+                cobertura = 100 * coletados / total if total else 100
+                novos = f", {len(brutos)} novos" if self.complementar else ""
+                print(f"  [{estado}] {chave}: {coletados}/{total} anúncios "
+                      f"({cobertura:.1f}%){novos} em {time.time() - t0:.0f}s", flush=True)
 
                 # arquivo = chave sem ":" e "|" (ex.: venda_350000-350000_area_0-49)
                 nome = chave.replace(":", "_").replace("|", "_")
+                if self.complementar:
+                    nome = f"complemento_{nome}"  # nunca sobrescreve um arquivo da coleta normal
                 if anuncios and self.storage.save_anuncios(anuncios, estado, nome, self.PORTAL_NAME):
                     total_saved += len(anuncios)
+                    existentes.update((str(pid), operacao) for pid in brutos)
                 elif anuncios:
                     self._falhas += 1
                     continue  # falhou ao salvar: não marca como feita, tenta na próxima execução
@@ -443,8 +462,37 @@ class ImovelwebScraper(BaseScraper):
                   f"falharam e serão refeitos na próxima execução", flush=True)
             return total_saved, 0
         salvar_progresso(concluido=True)
+        if self.complementar:
+            # O complemento percorreu o estado inteiro: marca também a coleta normal como
+            # concluída, para ela não coletar de novo (e duplicar) o que falta dela
+            principal = self.storage.get_portal_progress(self.PORTAL_NAME, chave_principal)
+            principal["concluido"] = True
+            self.storage.save_portal_progress(self.PORTAL_NAME, chave_principal, principal)
         print(f"\n[imovelweb] {chave_prog}: {total_saved} anúncios salvos", flush=True)
         return total_saved, -1
+
+    def _ids_existentes(self, estado: str) -> set:
+        """(postingId, operação) dos anúncios deste estado já gravados na coleta atual."""
+        import io
+        import pyarrow.parquet as pq
+
+        s3, bucket = self.storage.s3, self.storage.bucket
+        prefixo = (f"imoveis/portal={self.PORTAL_NAME}/coleta={self.storage.coleta_atual(self.PORTAL_NAME)}"
+                   f"/estado={estado}/")
+        ids, token = set(), None
+        while True:
+            kw = {"Bucket": bucket, "Prefix": prefixo}
+            if token:
+                kw["ContinuationToken"] = token
+            r = s3.list_objects_v2(**kw)
+            for o in r.get("Contents", []):
+                if o["Key"].endswith(".parquet"):
+                    corpo = s3.get_object(Bucket=bucket, Key=o["Key"])["Body"].read()
+                    t = pq.read_table(io.BytesIO(corpo), columns=["listing_id", "finalidade"])
+                    ids.update(zip(map(str, t.column("listing_id").to_pylist()), t.column("finalidade").to_pylist()))
+            if not r.get("IsTruncated"):
+                return ids
+            token = r["NextContinuationToken"]
 
     # --------------------------------------------------------------- parse
 
