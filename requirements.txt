@@ -9,3 +9,4 @@ cloudscraper==1.2.71
 boto3==1.35.0
 pandas==2.2.0
 pyarrow==15.0.0
+curl_cffi==0.16.3

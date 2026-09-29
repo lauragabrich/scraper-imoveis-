@@ -1,4 +1,4 @@
-name: Scraper VivaReal
+name: Scraper Imovelweb
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       reset:
-        description: 'Nova coleta do zero (--reset): zera o progresso e grava numa pasta coleta=<data> nova'
+        description: 'Recomeçar do zero (--reset)'
         type: boolean
         default: false
 
@@ -25,48 +25,38 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Anúncios (set/2026): Brasil 3,7 mi venda + 0,9 mi aluguel; SP 2,2 mi + 0,57 mi.
-          # O gargalo é o detalhe (1 requisição por anúncio, ~1,5 req/s por job para não
-          # ser bloqueado), então SP é dividido em 6 partes (~460 mil anúncios cada) e os
-          # demais estados agrupados em jobs de ~300 mil. Cada job roda noutra máquina/IP.
+          # Anúncios aproximados (set/2026): SP 3,9 mi | RS 481 mil | RJ 449 mil | MG 340 mil.
+          # Com a página de cada anúncio (~7/s por job), SP num job só levaria ~6,5 dias:
+          # dividido em 4 partes (segmentos de preço repartidos entre elas), ~2 dias.
           - grupo: sp-1
             estados: SP
-            parte: 1/6
+            parte: 1/4
           - grupo: sp-2
             estados: SP
-            parte: 2/6
+            parte: 2/4
           - grupo: sp-3
             estados: SP
-            parte: 3/6
+            parte: 3/4
           - grupo: sp-4
             estados: SP
-            parte: 4/6
-          - grupo: sp-5
-            estados: SP
-            parte: 5/6
-          - grupo: sp-6
-            estados: SP
-            parte: 6/6
-          - grupo: mg
-            estados: MG
-            parte: 1/1
-          - grupo: rj-es
-            estados: RJ,ES
+            parte: 4/4
+          - grupo: rj
+            estados: RJ
             parte: 1/1
           - grupo: rs
             estados: RS
             parte: 1/1
+          - grupo: mg
+            estados: MG
+            parte: 1/1
           - grupo: pr-sc
             estados: PR,SC
             parte: 1/1
-          - grupo: nordeste-norte
-            estados: BA,PE,CE,PA,AM,MA,PB,RN,AL,PI,SE,TO,RO,AC,AP,RR
-            parte: 1/1
-          - grupo: centro-oeste
-            estados: GO,DF,MT,MS
+          - grupo: outros
+            estados: BA,GO,DF,ES,PE,MT,PB,CE,SE,MS,AL,RN,RO,PI,PA,AM,MA,TO,AC,AP,RR
             parte: 1/1
     concurrency:
-      group: vivareal-${{ matrix.grupo }}
+      group: imovelweb-${{ matrix.grupo }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
@@ -75,4 +65,4 @@ jobs:
           python-version: '3.12'
       - run: pip install -r requirements.txt
       - name: Scrape ${{ matrix.estados }} (parte ${{ matrix.parte }})
-        run: python main.py --estado ${{ matrix.estados }} --parte ${{ matrix.parte }} --workers 4 $RESET_FLAG
+        run: python main.py --portal imovelweb --estado ${{ matrix.estados }} --parte ${{ matrix.parte }} --workers 12 --passadas 2 $RESET_FLAG

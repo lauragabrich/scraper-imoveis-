@@ -1,19 +1,44 @@
-import requests
-import json
-import os
-import time
+"""
+Scraper VivaReal (glue-api.vivareal.com, a API interna que o próprio site usa).
+
+Limites da API medidos em set/2026 (mudaram depois da coleta de ago/2026):
+  - no máximo ~1.500 anúncios por consulta: a partir de from=1488 a API responde
+    "From is above acceptable limit"; e no máximo 24 por página;
+  - o tipo de negócio vai em `business` (SALE/RENTAL). O antigo `businessType` é
+    ignorado e a API devolve venda;
+  - priceMin/priceMax (preço do negócio pedido) e usableAreasMin/usableAreasMax
+    funcionam, com limites inclusivos;
+  - a ordem padrão dos resultados é estável entre requisições.
+
+Por isso a coleta não usa mais cidades/bairros (a busca de bairros de A a Z deixava
+bairros de fora e cada bairro era cortado no teto da API). Segmentação:
+    estado × negócio (venda/aluguel) × tipo (usado/lançamento) × faixa de preço
+dividida ao meio até ter <= LIMITE_FAIXA anúncios; um preço único acima disso é
+dividido por área útil. Cada segmento vira um Parquet e entra no progresso
+(progress/vivareal/<UF>.json) quando termina.
+
+Título, descrição e outros campos só vêm no endpoint de detalhe de cada anúncio
+(ver DETALHE_CAMPOS), buscado por padrão.
+"""
+import math
 import random
-from scrapers.base import BaseScraper
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+import requests
+
 from config.settings import settings
+from scrapers.base import BaseScraper
 
 
 class VivaRealScraper(BaseScraper):
-    """Scraper para VivaReal via API interna - busca por bairro."""
+    """Scraper para VivaReal via API interna, segmentado por faixa de preço."""
 
     PORTAL_NAME = "vivareal"
     API_URL = "https://glue-api.vivareal.com/v2/listings"
-    LOCATIONS_URL = "https://glue-api.vivareal.com/v2/locations"
-    BAIRROS_CACHE = "bairros_cache.json"
+    POR_PAGINA = 24
+    MAX_ANUNCIOS_CONSULTA = 1488  # from + size; acima disso a API recusa
+    LIMITE_FAIXA = 1400           # folga abaixo do teto (o total muda durante a coleta)
 
     ESTADOS = {
         "SP": "São Paulo", "RJ": "Rio de Janeiro", "MG": "Minas Gerais",
@@ -26,17 +51,69 @@ class VivaRealScraper(BaseScraper):
         "AC": "Acre", "AP": "Amapá", "RR": "Roraima",
     }
 
-    # Capitais de cada estado (busca inicial)
-    CAPITAIS = {
-        "SP": "São Paulo", "RJ": "Rio de Janeiro", "MG": "Belo Horizonte",
-        "PR": "Curitiba", "RS": "Porto Alegre", "SC": "Florianópolis",
-        "BA": "Salvador", "PE": "Recife", "CE": "Fortaleza", "DF": "Brasília",
-        "GO": "Goiânia", "PA": "Belém", "AM": "Manaus", "MA": "São Luís",
-        "ES": "Vitória", "MT": "Cuiabá", "MS": "Campo Grande",
-        "PB": "João Pessoa", "RN": "Natal", "AL": "Maceió",
-        "PI": "Teresina", "SE": "Aracaju", "TO": "Palmas", "RO": "Porto Velho",
-        "AC": "Rio Branco", "AP": "Macapá", "RR": "Boa Vista",
+    # (business, listingType) coletados; lançamento para aluguel praticamente não existe
+    NEGOCIOS = [("SALE", "USED"), ("SALE", "DEVELOPMENT"), ("RENTAL", "USED")]
+    NOMES = {"SALE": "venda", "RENTAL": "aluguel", "USED": "usado", "DEVELOPMENT": "lancamento"}
+
+    # Faixas iniciais de preço; cada uma é subdividida conforme a quantidade de anúncios.
+    # hi=None = sem teto. Anúncios sem preço (~0,003%) não entram em nenhuma faixa.
+    FAIXAS_INICIAIS = [(0, 999_999), (1_000_000, 9_999_999_999), (10_000_000_000, None)]
+
+    @staticmethod
+    def _bandas_finas() -> list[tuple]:
+        """Com o estado dividido em partes, ~65 faixas fixas (crescimento de 30%, de R$ 500
+        a R$ 10 bi) repartidas entre as partes: cada parte só consulta as suas, em vez de
+        todas montarem a divisão do estado inteiro (~5 s por consulta)."""
+        cortes, x = [0], 500.0
+        while x < 10_000_000_000:
+            cortes.append(int(round(x, -2)))
+            x *= 1.3
+        return [(a, b - 1) for a, b in zip(cortes, cortes[1:])] + [(cortes[-1], None)]
+    # Faixas de área útil (m²), usadas só quando um preço único passa do limite
+    # (ex.: ~6.500 anúncios a exatamente R$ 500.000 só na capital de SP)
+    FAIXAS_AREA = [(0, 49), (50, 69), (70, 99), (100, 149), (150, 99_999_999)]
+
+    ESTAGIOS_OBRA = {
+        "PRE_LAUNCH": "Breve lançamento", "PLAN_ONLY": "Na planta",
+        "UNDER_CONSTRUCTION": "Em obra", "BUILT": "Pronto",
     }
+    STATUS_LANCAMENTO = {"PRE_LAUNCH", "PLAN_ONLY", "UNDER_CONSTRUCTION"}
+
+    # Endpoint de um anúncio: desde ~ago/2026 é a única fonte de título e descrição (a
+    # busca parou de enviá-los), além de updatedAt, ano de entrega, amenities em português,
+    # transporte próximo e portais onde o anúncio também está. includeFields evita os
+    # blocos de recomendações/outros anúncios (~490 KB -> poucos KB).
+    DETALHE_URL = "https://glue-api.vivareal.com/v2/listing/{id}"
+    DETALHE_CAMPOS = (
+        "listing(title,description,updatedAt,deliveredAt,portals,portal,status,"
+        "searchableAmenities,mergedAmenities,mergedSearchableAmenities,aiAmenities,"
+        "aiSearchableAmenities,nearBy,videoTourLink,buildings,pricingInfos,"
+        "displayAddressGeolocation,address,condominiumName,listingsCount,lqs,qualityScores,"
+        "attributes,nonActivationReason)"
+    )
+
+    def __init__(self, detalhes: bool = True, workers: int = 4, parte: int = 1, partes: int = 1):
+        super().__init__()
+        self.detalhes = detalhes
+        # Requisições em paralelo (listagem e detalhe). Cada uma espera REQUEST_DELAY_MIN..MAX:
+        # com 4 workers e 1–3 s dá ~1,5 req/s. O Cloudflare do VivaReal bloqueou por >1h um
+        # IP a ~10 req/s; aumente com cuidado.
+        self.workers = workers
+        # Divisão de um estado em N jobs (--parte 2/4): cada segmento de preço/área
+        # pertence a uma parte (crc32 da chave); progresso separado por parte
+        self.parte, self.partes = parte, partes
+        self.cidade = ""          # --cidade restringe as consultas (addressCity)
+        self._divididos = set()   # segmentos já subdivididos (vem do progresso)
+        self._falhas = 0
+        self.faixas_iniciais = self._bandas_finas() if partes > 1 else self.FAIXAS_INICIAIS
+
+    def _chave_progresso(self, estado: str) -> str:
+        return estado if self.partes == 1 else f"{estado}_parte{self.parte}de{self.partes}"
+
+    def _e_meu(self, indice_faixa: int) -> bool:
+        """Faixas iniciais repartidas em rodízio entre as partes; tudo que sai da
+        subdivisão de uma faixa pertence à mesma parte."""
+        return self.partes == 1 or indice_faixa % self.partes == self.parte - 1
 
     def _get_api_headers(self):
         return {
@@ -45,356 +122,337 @@ class VivaRealScraper(BaseScraper):
             "Accept": "application/json",
         }
 
-    def discover_cidades(self, estado: str) -> list[str]:
-        """Retorna todas as cidades de um estado (via IBGE - lista completa)."""
-        from utils.ibge_cidades import get_cidades_estado
+    # ------------------------------------------------------------------ busca
 
-        cidades = get_cidades_estado(estado)
-        print(f"[vivareal] {len(cidades)} cidades em {estado} (IBGE)", flush=True)
-        return cidades
-
-    def discover_bairros(self, estado: str, cidade: str) -> list[str]:
-        """Descobre bairros de uma cidade via API de locations."""
-        # Verifica cache
-        cache = self._load_bairros_cache()
-        key = f"{estado}_{cidade}"
-        if key in cache:
-            return cache[key]
-
-        print(f"[vivareal] Descobrindo bairros de {cidade}/{estado}...")
-
-        bairros = set()
-        estado_nome = self.ESTADOS.get(estado.upper(), estado)
-
-        # Busca letras A-Z + silabas comuns para pegar mais bairros
-        queries = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ") + [
-            "Vila", "Jardim", "Parque", "Centro", "Santa", "São",
-            "Bela", "Nova", "Alto", "Barra", "Campo", "Cidade",
-        ]
-
-        for query in queries:
-            self.rate_limiter.wait()
-            try:
-                params = {
-                    "q": f"{query} {cidade}",
-                    "addressState": estado_nome,
-                    "size": "50",
-                }
-                r = requests.get(
-                    self.LOCATIONS_URL,
-                    params=params,
-                    headers=self._get_api_headers(),
-                    timeout=15,
-                )
-                if r.status_code == 200:
-                    data = r.json()
-                    neighborhoods = data.get("neighborhood", {}).get("result", {}).get("locations", [])
-                    for n in neighborhoods:
-                        addr = n.get("address", {})
-                        name = addr.get("neighborhood")
-                        n_city = addr.get("city", "")
-                        if name and n_city.lower() == cidade.lower():
-                            bairros.add(name)
-            except Exception:
-                continue
-
-        bairros_list = sorted(list(bairros))
-        print(f"[vivareal] {len(bairros_list)} bairros encontrados em {cidade}/{estado}")
-
-        # Salva cache
-        cache[key] = bairros_list
-        self._save_bairros_cache(cache)
-
-        return bairros_list
-
-    def _load_bairros_cache(self) -> dict:
-        if os.path.exists(self.BAIRROS_CACHE):
-            with open(self.BAIRROS_CACHE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        return {}
-
-    def _save_bairros_cache(self, cache: dict):
-        with open(self.BAIRROS_CACHE, "w", encoding="utf-8") as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
-
-    def _make_request(self, estado: str, cidade: str, bairro: str, page: int, size: int = 24, listing_type: str = "USED"):
-        """Faz request na API do VivaReal com bairro."""
-        estado_nome = self.ESTADOS.get(estado.upper(), estado)
+    def _consulta(self, estado: str, seg: tuple, inicio: int = 0) -> tuple[int | None, list]:
+        """Uma página de resultados. seg = (business, listingType, preço mín, preço máx,
+        área mín, área máx); None = sem teto / sem filtro. Retorna (total, anúncios)."""
+        business, listing_type, lo, hi, alo, ahi = seg
         params = {
-            "addressState": estado_nome,
-            "addressCity": cidade,
-            "addressNeighborhood": bairro,
-            "businessType": "SALE",
+            "addressState": self.ESTADOS.get(estado.upper(), estado),
+            "business": business,
             "listingType": listing_type,
-            "size": str(size),
-            "from": str((page - 1) * size),
+            "priceMin": str(lo),
+            "size": str(self.POR_PAGINA),
+            "from": str(inicio),
             "categoryPage": "RESULT",
         }
-        self.rate_limiter.wait()
-        response = requests.get(
-            self.API_URL,
-            params=params,
-            headers=self._get_api_headers(),
-            timeout=15,
-        )
-        response.raise_for_status()
-        return response.json()
+        if hi is not None:
+            params["priceMax"] = str(hi)
+        if alo is not None:
+            params["usableAreasMin"] = str(alo)
+            if ahi is not None:
+                params["usableAreasMax"] = str(ahi)
+        if self.cidade:
+            params["addressCity"] = self.cidade
+
+        for tentativa in range(5):
+            time.sleep(random.uniform(settings.REQUEST_DELAY_MIN, settings.REQUEST_DELAY_MAX))
+            try:
+                r = requests.get(self.API_URL, params=params, headers=self._get_api_headers(), timeout=30)
+                if r.status_code == 200:
+                    busca = r.json().get("search") or {}
+                    return busca.get("totalCount"), (busca.get("result") or {}).get("listings") or []
+                if r.status_code in (400, 404):
+                    return None, []  # parâmetro recusado (ex.: from acima do teto): não adianta repetir
+                espera = 60 * (tentativa + 1) if r.status_code in (403, 429) else 10 * (tentativa + 1)
+                print(f"    [vivareal] HTTP {r.status_code}, aguardando {espera}s "
+                      f"(tentativa {tentativa + 1}/5)", flush=True)
+            except (requests.RequestException, ValueError) as e:
+                espera = 10 * (tentativa + 1)
+                print(f"    [vivareal] {type(e).__name__}, aguardando {espera}s", flush=True)
+            time.sleep(espera)
+        return None, []
+
+    # ---------------------------------------------------------- segmentação
+
+    def _chave(self, seg: tuple) -> str:
+        business, listing_type, lo, hi, alo, ahi = seg
+        chave = (f"{self.NOMES[business]}-{self.NOMES[listing_type]}:"
+                 f"{lo}-{hi if hi is not None else 'max'}")
+        if alo is not None:
+            chave += f"|area:{alo}-{ahi if ahi is not None else 'max'}"
+        return chave
+
+    @staticmethod
+    def _dividir(lo: int, hi: int) -> int:
+        """Ponto de corte: geométrico em faixas muito largas, aritmético nas estreitas."""
+        if lo > 0 and hi / lo > 4:
+            return int(math.sqrt(lo * hi))
+        return (lo + hi) // 2
+
+    def _subdividir(self, seg: tuple) -> list[tuple] | None:
+        """Divide um segmento grande demais: primeiro pelo preço; quando a faixa já é um
+        preço único, pela área útil."""
+        business, listing_type, lo, hi, alo, ahi = seg
+        if hi is not None and hi > lo:
+            meio = self._dividir(lo, hi)
+            return [(business, listing_type, lo, meio, alo, ahi), (business, listing_type, meio + 1, hi, alo, ahi)]
+        if alo is None:
+            # Anúncios sem área informada ficam fora das faixas de área
+            return [(business, listing_type, lo, hi, a, b) for a, b in self.FAIXAS_AREA]
+        if ahi is not None and ahi > alo:
+            meio = self._dividir(alo, ahi)
+            return [(business, listing_type, lo, hi, alo, meio), (business, listing_type, lo, hi, meio + 1, ahi)]
+        return None
+
+    def _faixas(self, estado: str, feitos: set):
+        """Gera (segmento, total, anúncios da 1ª página) para segmentos com <= LIMITE_FAIXA,
+        só das faixas iniciais que pertencem a esta parte."""
+        pendentes = [(b, t, lo, hi, None, None) for b, t in self.NEGOCIOS
+                     for i, (lo, hi) in enumerate(self.faixas_iniciais) if self._e_meu(i)]
+        while pendentes:
+            seg = pendentes.pop(0)
+            chave = self._chave(seg)
+            if chave in feitos:
+                continue
+            if chave in self._divididos and self._subdividir(seg):
+                pendentes[0:0] = self._subdividir(seg)  # já dividido antes: vai direto aos filhos
+                continue
+            total, pagina1 = self._consulta(estado, seg)
+            if total is None:
+                print(f"  [vivareal] Falha ao consultar {chave}, pulando (será refeito na próxima execução)", flush=True)
+                self._falhas += 1
+                continue
+            if total > self.LIMITE_FAIXA:
+                partes = self._subdividir(seg)
+                if partes:
+                    self._divididos.add(chave)
+                    pendentes[0:0] = partes
+                    continue
+                print(f"  [vivareal] {chave} tem {total} anúncios e não dá para dividir; "
+                      f"coletando os primeiros {self.MAX_ANUNCIOS_CONSULTA}", flush=True)
+            yield seg, total, pagina1
+
+    @staticmethod
+    def _pertence(anuncio: dict, seg: tuple) -> bool:
+        """Os filtros da API casam com QUALQUER preço/área do anúncio (ex.: áreas [61, 70]
+        aparecem nas fatias 50-69 e 70-99), o que duplicaria anúncios entre fatias. Cada
+        anúncio fica só na fatia do seu preço principal (e área principal, se a fatia é
+        por área) — que sempre é uma das fatias em que a API o devolve."""
+        _, _, lo, hi, alo, ahi = seg
+        preco, area = anuncio.get("preco"), anuncio.get("area_construida")
+        if preco is not None and not (lo <= preco < (hi + 1 if hi is not None else float("inf"))):
+            return False
+        if alo is not None and area is not None and not (alo <= area < (ahi + 1 if ahi is not None else float("inf"))):
+            return False
+        return True
+
+    # --------------------------------------------------------------- coleta
+
+    def _coletar_faixa(self, estado: str, seg: tuple, total: int, pagina1: list) -> tuple[dict, bool]:
+        """Todas as páginas do segmento (em paralelo). Retorna ({id: item da API}, ok);
+        ok=False se alguma página falhou mesmo após as tentativas."""
+        itens = {x["listing"]["id"]: x for x in pagina1 if (x.get("listing") or {}).get("id")}
+        fim = min(total, self.MAX_ANUNCIOS_CONSULTA)
+        inicios = range(self.POR_PAGINA, fim, self.POR_PAGINA)
+        ok = True
+        with ThreadPoolExecutor(max_workers=self.workers) as pool:
+            for total_pagina, pagina in pool.map(lambda i: self._consulta(estado, seg, i), inicios):
+                ok = ok and total_pagina is not None
+                for x in pagina:
+                    lid = (x.get("listing") or {}).get("id")
+                    if lid:
+                        itens[lid] = x
+        return itens, ok
 
     def get_total_pages(self, estado: str, cidade: str) -> int:
-        """Não usado na abordagem por bairro."""
+        """Não usado (coleta por faixa de preço)."""
         return 0
 
     def collect_listings_page(self, estado: str, cidade: str, page: int) -> list[dict]:
-        """Não usado na abordagem por bairro."""
+        """Não usado (coleta por faixa de preço)."""
         return []
 
-    def scrape_bairro(self, estado: str, cidade: str, bairro: str, limit_pages: int = 420) -> list[dict]:
-        """Coleta todos os anúncios de um bairro (usados + lançamentos). Retorna lista."""
-        anuncios = []
-        anuncios.extend(self._collect_bairro_type(estado, cidade, bairro, "USED", limit_pages))
-        anuncios.extend(self._collect_bairro_type(estado, cidade, bairro, "DEVELOPMENT", limit_pages))
-        return anuncios
-
-    def scrape_cidade_completa(self, estado: str, cidade: str, bairros_ja_feitos: list = None) -> int:
-        """Scrape uma cidade: todos os bairros + busca sem bairro + bairros descobertos no fallback.
-        Salva parcialmente a cada 30 bairros para não perder dados.
-        Pula bairros que já foram processados (pela lista de nomes)."""
-        anuncios = []
-        bairros_processados = set(b.lower() for b in (bairros_ja_feitos or []))
-        saved_total = 0
-        # Offset alto se estamos continuando para não sobrescrever arquivos
-        file_offset = len(bairros_processados) * 100 if bairros_processados else 0
-        bairros_novos_nesta_execucao = list(bairros_ja_feitos or [])
-
-        # Descobre bairros via API de locations
-        bairros = self.discover_bairros(estado, cidade)
-
-        # Processa cada bairro encontrado, salvando parcialmente a cada 30
-        bairros_processados_count = 0
-        if bairros:
-            bairros_a_fazer = [b for b in bairros if b.lower() not in bairros_processados]
-            if bairros_ja_feitos:
-                print(f"  [vivareal] {len(bairros) - len(bairros_a_fazer)} bairros já feitos, {len(bairros_a_fazer)} restantes", flush=True)
-
-            for i, bairro in enumerate(bairros_a_fazer):
-                bairros_processados.add(bairro.lower())
-                bairros_novos_nesta_execucao.append(bairro)
-                anuncios.extend(self._collect_bairro(estado, cidade, bairro))
-                bairros_processados_count += 1
-
-                # Salvamento parcial a cada 30 bairros
-                if bairros_processados_count % 30 == 0 and anuncios:
-                    saved_total += self._save_partial(anuncios, estado, cidade, file_offset + saved_total)
-                    anuncios = []
-                    # Salva progresso com bairros processados até agora
-                    cidade_idx = self._get_cidade_idx(estado, cidade)
-                    self.storage.save_progress(
-                        estado, cidade_idx * 1000 + 1,
-                        cidade_nome=cidade,
-                        bairros_processados=bairros_novos_nesta_execucao
-                    )
-
-        # Fallback: busca sem bairro e descobre bairros que escaparam
-        fallback_anuncios = self._collect_bairro(estado, cidade, "")
-
-        # Extrai bairros novos dos resultados do fallback
-        bairros_novos = set()
-        for anuncio in fallback_anuncios:
-            bairro_nome = anuncio.get("bairro")
-            if bairro_nome and bairro_nome.lower() not in bairros_processados:
-                bairros_novos.add(bairro_nome)
-
-        anuncios.extend(fallback_anuncios)
-
-        # Processa bairros que foram descobertos no fallback
-        if bairros_novos:
-            print(f"  [vivareal] {len(bairros_novos)} bairros novos descobertos no fallback", flush=True)
-            fallback_count = 0
-            for bairro in bairros_novos:
-                bairros_processados.add(bairro.lower())
-                bairros_novos_nesta_execucao.append(bairro)
-                anuncios.extend(self._collect_bairro(estado, cidade, bairro))
-                fallback_count += 1
-
-                # Salvamento parcial também no fallback a cada 30
-                if fallback_count % 30 == 0 and anuncios:
-                    saved_total += self._save_partial(anuncios, estado, cidade, file_offset + saved_total)
-                    anuncios = []
-                    cidade_idx = self._get_cidade_idx(estado, cidade)
-                    self.storage.save_progress(
-                        estado, cidade_idx * 1000 + 1,
-                        cidade_nome=cidade,
-                        bairros_processados=bairros_novos_nesta_execucao
-                    )
-
-        # Salvamento final (o que sobrou)
-        if anuncios:
-            saved_total += self._save_partial(anuncios, estado, cidade, file_offset + saved_total)
-
-        return saved_total
-
-    def _get_cidade_idx(self, estado: str, cidade: str) -> int:
-        """Retorna o índice da cidade na lista do IBGE."""
-        from utils.ibge_cidades import get_cidades_estado
-        cidades = get_cidades_estado(estado)
-        try:
-            return cidades.index(cidade)
-        except ValueError:
-            return 0
-
-    def _save_partial(self, anuncios: list[dict], estado: str, cidade: str, offset: int) -> int:
-        """Salva lote parcial no S3, removendo duplicatas. Retorna quantidade salva."""
-        # Remove duplicatas por URL
-        seen_urls = set()
-        anuncios_unicos = []
-        for anuncio in anuncios:
-            url = anuncio.get("url")
-            if url and url not in seen_urls:
-                seen_urls.add(url)
-                anuncios_unicos.append(anuncio)
-
-        if not anuncios_unicos:
-            return 0
-
-        # Se é a primeira parte, salva como arquivo principal; senão, como parte
-        if offset == 0:
-            success = self.storage.save_anuncios(anuncios_unicos, estado, cidade, self.PORTAL_NAME)
-        else:
-            success = self.storage.save_anuncios(anuncios_unicos, estado, cidade, self.PORTAL_NAME, part=offset)
-
-        return len(anuncios_unicos) if success else 0
-
-    def _collect_bairro(self, estado: str, cidade: str, bairro: str) -> list[dict]:
-        """Coleta anúncios de um bairro (usados + lançamentos). Retorna lista."""
-        anuncios = []
-        anuncios.extend(self._collect_bairro_type(estado, cidade, bairro, "USED"))
-        anuncios.extend(self._collect_bairro_type(estado, cidade, bairro, "DEVELOPMENT"))
-        return anuncios
-
-    def _collect_bairro_type(self, estado: str, cidade: str, bairro: str, listing_type: str, limit_pages: int = 420) -> list[dict]:
-        """Coleta anúncios de um tipo específico. Retorna lista."""
-        anuncios = []
-        empty_pages = 0
-
-        for page in range(1, limit_pages + 1):
-            try:
-                data = self._make_request(estado, cidade, bairro, page, listing_type=listing_type)
-                listings = data.get("search", {}).get("result", {}).get("listings", [])
-
-                if not listings:
-                    empty_pages += 1
-                    if empty_pages >= 2:
-                        break
-                    continue
-
-                empty_pages = 0
-
-                for item in listings:
-                    parsed = self._parse_listing(item)
-                    if parsed:
-                        parsed["portal"] = self.PORTAL_NAME
-                        anuncios.append(parsed)
-
-            except Exception as e:
-                error_str = str(e)
-                if "429" in error_str:
-                    # Rate limit: espera e tenta de novo (até 3 vezes)
-                    retried = False
-                    for retry_attempt in range(3):
-                        wait_time = 60 * (retry_attempt + 1)  # 60s, 120s, 180s
-                        print(f"    [429] Rate limit, aguardando {wait_time}s (tentativa {retry_attempt+1}/3)...", flush=True)
-                        time.sleep(wait_time)
-                        try:
-                            data = self._make_request(estado, cidade, bairro, page, listing_type=listing_type)
-                            listings = data.get("search", {}).get("result", {}).get("listings", [])
-                            if listings:
-                                for item in listings:
-                                    parsed = self._parse_listing(item)
-                                    if parsed:
-                                        parsed["portal"] = self.PORTAL_NAME
-                                        anuncios.append(parsed)
-                            retried = True
-                            break
-                        except Exception:
-                            continue
-                    if not retried:
-                        print(f"    [429] Falhou 3 vezes, pulando bairro", flush=True)
-                        break
-                elif "400" in error_str:
-                    break
-                else:
-                    break
-
-        return anuncios
-
-    def run(self, estado: str = "SP", cidade: str = "", limit: int = None, start_page: int = 1, bairros_ja_processados: list = None):
-        """Executa scraping por cidade e bairro. Retorna (saved, last_index)."""
-
-        print(f"\n{'='*60}", flush=True)
-        print(f"Scraping VivaReal: {estado} (todas as cidades)", flush=True)
-        print(f"{'='*60}\n", flush=True)
-
-        # Se cidade específica foi passada, processa só ela
-        if cidade:
-            cidades = [cidade]
-        else:
-            cidades = self.discover_cidades(estado)
-            if not cidades:
-                # Fallback para capital
-                capital = self.CAPITAIS.get(estado.upper(), "")
-                cidades = [capital] if capital else []
-
-        if not cidades:
-            print(f"[vivareal] Nenhuma cidade encontrada para {estado}", flush=True)
+    def run(self, estado: str = "SP", cidade: str = "", limit: int = None, reset: bool = False):
+        """Coleta um estado inteiro (venda, lançamentos e aluguel). Retorna (salvos, -1 se concluído)."""
+        estado = estado.upper()
+        if estado not in self.ESTADOS:
+            print(f"[vivareal] Estado desconhecido: {estado}", flush=True)
             return 0, -1
+        self.cidade = cidade
 
-        # start_page aqui é o índice global (cidade*1000 + bairro)
-        start_cidade_idx = (start_page - 1) // 1000 if start_page > 1 else 0
+        chave_prog = self._chave_progresso(estado) + (f"_{cidade}" if cidade else "")
+        progress = {} if reset else self.storage.get_portal_progress(self.PORTAL_NAME, chave_prog)
+        if progress.get("concluido"):
+            print(f"[vivareal] {chave_prog} já concluído, pulando (use --reset para refazer)", flush=True)
+            return 0, -1
+        feitos = set(progress.get("segmentos_concluidos", []))
+        self._divididos = set(progress.get("segmentos_divididos", []))
+        self._falhas = 0  # consultas/gravações que falharam: impedem marcar como concluído
 
-        print(f"[vivareal] {len(cidades)} cidades para processar", flush=True)
+        def salvar_progresso(concluido=False):
+            dados = {"segmentos_concluidos": sorted(feitos), "segmentos_divididos": sorted(self._divididos)}
+            if concluido:
+                dados["concluido"] = True
+            self.storage.save_portal_progress(self.PORTAL_NAME, chave_prog, dados)
 
+        parte_txt = f" (parte {self.parte}/{self.partes})" if self.partes > 1 else ""
+        print(f"\n{'='*60}\nScraping VivaReal: {estado}{parte_txt}{' - ' + cidade if cidade else ''}\n{'='*60}",
+              flush=True)
         total_saved = 0
-        last_progress = start_page
 
-        for cidade_idx in range(start_cidade_idx, len(cidades)):
-            cidade_nome = cidades[cidade_idx]
-            print(f"\n[{estado}] Cidade {cidade_idx+1}/{len(cidades)}: {cidade_nome}", flush=True)
+        for seg, total, pagina1 in self._faixas(estado, feitos):
+            chave = self._chave(seg)
+            if not total:
+                feitos.add(chave)
+                continue
 
-            # Se é a cidade onde parou, passa bairros já processados
-            current_bairros_done = bairros_ja_processados if cidade_idx == start_cidade_idx else []
+            t0 = time.time()
+            itens, ok = self._coletar_faixa(estado, seg, total, pagina1)
+            if not ok:
+                print(f"  [vivareal] {chave}: páginas falharam, fatia será refeita na próxima execução", flush=True)
+                self._falhas += 1
+                continue
+            parseados = [a for a in (self._parse_listing(x, seg[0]) for x in itens.values()) if a]
+            if len(parseados) < len(itens):
+                print(f"  [vivareal] AVISO: {len(itens) - len(parseados)} anúncios descartados "
+                      f"por erro de parse em {chave}", flush=True)
+            # Antes do detalhe, para não gastar requisição com anúncio que é de outra fatia
+            anuncios = [a for a in parseados if self._pertence(a, seg)]
+            if self.detalhes and anuncios:
+                self._enriquecer(anuncios)
 
-            saved = self.scrape_cidade_completa(estado, cidade_nome, bairros_ja_feitos=current_bairros_done)
-            total_saved += saved
-            last_progress = (cidade_idx + 1) * 1000 + 1
+            cobertura = 100 * len(itens) / total if total else 100
+            print(f"  [{estado}] {chave}: {len(itens)}/{total} anúncios ({cobertura:.1f}%), "
+                  f"{len(anuncios)} desta fatia, em {time.time() - t0:.0f}s", flush=True)
 
-            if saved > 0:
-                print(f"  → {saved} anúncios ({total_saved} total)", flush=True)
+            # arquivo = chave sem ":" e "|" (ex.: venda-usado_500000-500000_area_0-49)
+            nome = chave.replace(":", "_").replace("|", "_")
+            if cidade:
+                nome = f"{cidade}_{nome}"
+            if anuncios and self.storage.save_anuncios(anuncios, estado, nome, self.PORTAL_NAME):
+                total_saved += len(anuncios)
+            elif anuncios:
+                self._falhas += 1
+                continue  # falhou ao salvar: não marca como feito, tenta na próxima execução
 
-            # Salva progresso a cada cidade (lista vazia = cidade concluída)
-            self.storage.save_progress(estado, last_progress, cidade_nome="", bairros_processados=[])
-
-            # Reseta para próximas cidades
-            bairros_ja_processados = []
+            feitos.add(chave)
+            salvar_progresso()
 
             if limit and total_saved >= limit:
-                print(f"\n[vivareal] Limite de {limit} atingido", flush=True)
-                return total_saved, last_progress
+                print(f"[vivareal] Limite de {limit} atingido", flush=True)
+                return total_saved, 0
 
-        print(f"\n[vivareal] {estado}: {total_saved} anúncios salvos ({len(cidades)} cidades)", flush=True)
+        if self._falhas:
+            salvar_progresso()
+            print(f"\n[vivareal] {chave_prog}: {total_saved} anúncios salvos; {self._falhas} segmentos "
+                  f"falharam e serão refeitos na próxima execução", flush=True)
+            return total_saved, 0
+        salvar_progresso(concluido=True)
+        print(f"\n[vivareal] {chave_prog}: {total_saved} anúncios salvos", flush=True)
         return total_saved, -1
 
-    def _parse_listing(self, item: dict) -> dict | None:
+    # -------------------------------------------------------------- detalhe
+
+    def _detalhe(self, listing_id) -> dict | None:
+        """Campos do endpoint de detalhe. O Cloudflare limita a taxa (429 acima de
+        ~8 req/s), então cada worker respeita o delay e espera mais a cada 429."""
+        for tentativa in range(4):
+            time.sleep(random.uniform(settings.REQUEST_DELAY_MIN, settings.REQUEST_DELAY_MAX))
+            try:
+                r = requests.get(self.DETALHE_URL.format(id=listing_id), params={"includeFields": self.DETALHE_CAMPOS},
+                                 headers=self._get_api_headers(), timeout=20)
+                if r.status_code == 200:
+                    return r.json().get("listing") or {}
+                if r.status_code == 404:
+                    return None
+                if r.status_code == 429:
+                    time.sleep(60 * (tentativa + 1))
+            except (requests.RequestException, ValueError):
+                time.sleep(5)
+        return None
+
+    def _enriquecer(self, anuncios: list[dict]):
+        """Preenche titulo, descricao, data_ultima_atualizacao e idade_imovel pelo detalhe."""
+        from concurrent.futures import ThreadPoolExecutor
+        from datetime import datetime
+
+        with ThreadPoolExecutor(max_workers=self.workers) as pool:
+            detalhes = list(pool.map(self._detalhe, [a.get("listing_id") for a in anuncios]))
+
+        ano_atual = datetime.utcnow().year
+        sem_detalhe = 0
+        for anuncio, det in zip(anuncios, detalhes):
+            if not det:
+                sem_detalhe += 1
+                continue
+            anuncio["titulo"] = det.get("title") or anuncio.get("titulo")
+            anuncio["descricao"] = det.get("description") or anuncio.get("descricao")
+            anuncio["data_ultima_atualizacao"] = det.get("updatedAt")
+            negocio = anuncio.get("contract_type") or "SALE"
+            preco_det = next((p for p in det.get("pricingInfos") or [] if p.get("businessType") == negocio), {})
+            if preco_det.get("iptuPeriod") and preco_det["iptuPeriod"] != "Period_NONE":
+                anuncio["periodo_iptu"] = preco_det["iptuPeriod"]
+            if det.get("mergedSearchableAmenities") or det.get("searchableAmenities"):
+                # versão em português e mais completa (inclui o que a IA do portal extraiu do texto)
+                anuncio["amenities"] = det.get("mergedSearchableAmenities") or det.get("searchableAmenities")
+            anuncio["transporte_proximo"] = self._formatar_proximidades(det.get("nearBy"))
+            anuncio["outros_portais"] = "|".join(det.get("portals") or []) or None
+            anuncio["qualidade_anuncio"] = det.get("lqs") or (det.get("qualityScores") or {}).get("lqsBeta")
+            endereco_det = det.get("address") or {}
+            h3 = (endereco_det.get("h3") or [{}])[0]
+            anuncio["h3_index"] = h3.get("index")
+            # Pontos de interesse próximos, com prefixo de categoria do portal (ex.: "BS:" = ponto de ônibus)
+            anuncio["pontos_interesse"] = "|".join(endereco_det.get("poisList") or []) or None
+            # attributes.olx_id vem como texto "{sale=1516661524}" (ou com rent=...)
+            olx = str((det.get("attributes") or {}).get("olx_id") or "").strip("{} ")
+            anuncio["olx_id"] = olx or None
+            try:
+                ano = int(str(det.get("deliveredAt"))[:4])
+                if 1800 < ano <= ano_atual:
+                    anuncio["idade_imovel"] = ano_atual - ano
+                elif ano > ano_atual:
+                    anuncio["lancamento"] = True
+                    anuncio["previsao_entrega"] = anuncio.get("previsao_entrega") or str(det["deliveredAt"])[:7]
+            except (TypeError, ValueError):
+                pass
+
+        if sem_detalhe:
+            print(f"    [vivareal] AVISO: {sem_detalhe}/{len(anuncios)} anúncios sem detalhe "
+                  f"(título/descrição vazios)", flush=True)
+
+    @staticmethod
+    def _formatar_endereco(end) -> str | None:
+        """account.addresses.billing -> "Rua Girassol, 1088 - Vila Madalena, São Paulo/SP"."""
+        if not isinstance(end, dict):
+            return None
+        rua = ", ".join(str(x) for x in (end.get("street"), end.get("streetNumber"), end.get("complement")) if x)
+        local = ", ".join(x for x in (end.get("neighborhood"),
+                                       "/".join(x for x in (end.get("city"), end.get("state")) if x)) if x)
+        return " - ".join(x for x in (rua, local) if x) or None
+
+    @staticmethod
+    def _formatar_proximidades(near_by) -> str | None:
+        """nearBy = {"oneKm": {"TP": [...]}, "twoKm": ..., "threeKm": ...} (TP = transporte
+        público). Vira "1km: Metrô Moema, Metrô AACD | 2km: ..." sem repetir estações."""
+        if not isinstance(near_by, dict):
+            return None
+        partes, vistos = [], set()
+        for chave, rotulo in (("oneKm", "1km"), ("twoKm", "2km"), ("threeKm", "3km")):
+            itens = [x for lista in (near_by.get(chave) or {}).values() for x in (lista or [])
+                     if x and x not in vistos]
+            vistos.update(itens)
+            if itens:
+                partes.append(f"{rotulo}: {', '.join(itens)}")
+        return " | ".join(partes) or None
+
+    def _parse_listing(self, item: dict, business: str = "SALE") -> dict | None:
         """Parse de um anúncio da API - extrai TODOS os campos disponíveis."""
 
         try:
             listing = item.get("listing", {})
             address = listing.get("address", {})
-            pricing = listing.get("pricingInfos", [{}])
-            price_info = pricing[0] if pricing else {}
+            pricing = listing.get("pricingInfos", [{}]) or [{}]
+            # Um anúncio de venda e aluguel traz os dois preços (ordem não garantida):
+            # usa o do negócio que está sendo coletado
+            price_info = next((p for p in pricing if p.get("businessType") == business), pricing[0])
 
-            # Fotos
-            images = item.get("medias", [])
-            fotos = "|".join([m.get("url", "") for m in images if m.get("url")]) or None
+            # Mídias: separa fotos de vídeos, tours e plantas (antes iam todos para fotos_urls)
+            medias = item.get("medias", []) or []
+            images = [m for m in medias if m.get("url") and m.get("type", "IMAGE") == "IMAGE"]
+            tipos_midia = {m.get("type") for m in medias}
+            fotos = "|".join(m["url"] for m in images) or None
             image_count = len(images)
 
             # Preço
@@ -410,8 +468,8 @@ class VivaRealScraper(BaseScraper):
             created = listing.get("createdAt")
             updated = listing.get("updatedAt")
 
-            # URL
-            link = listing.get("link", {})
+            # URL (o link fica no item, não dentro de listing)
+            link = item.get("link") or listing.get("link") or {}
             url = f"https://www.vivareal.com.br{link.get('href', '')}" if link.get("href") else None
             if not url:
                 lid = listing.get("id", "")
@@ -436,8 +494,17 @@ class VivaRealScraper(BaseScraper):
             # Campos adicionais
             usage_types = listing.get("usageTypes", [])
             unit_types = listing.get("unitTypes", [])
-            floors = listing.get("floors", [])
-            unit_floor = listing.get("unitFloor", [])
+            # unitFloor = andar da unidade (número); floors = andares do prédio (lista).
+            # Antes: unitFloor era lido como lista, e todo anúncio com andar informado
+            # dava TypeError e era descartado (~8%); além disso os dois estavam trocados.
+            andar = self._primeiro_int(listing.get("unitFloor"))
+            total_andares = self._primeiro_int(listing.get("floors"))
+
+            # Obra: status atual e data prevista para BUILT no calendário
+            status_obra = (listing.get("constructionStatus") or "").replace("ConstructionStatus_", "")
+            estagio = self.ESTAGIOS_OBRA.get(status_obra, status_obra or None) if status_obra != "NONE" else None
+            entrega = next((c.get("date") for c in listing.get("constructionStatusCalendar") or []
+                            if c.get("constructionStatus") == "BUILT"), None)
 
             # Anunciante
             advertiser = item.get("account", {}) or item.get("advertiser", {})
@@ -449,12 +516,16 @@ class VivaRealScraper(BaseScraper):
             aluguel_total = price_info.get("rentalTotalPrice") or rental_info.get("monthlyRentalTotalPrice")
 
             # Stamps
-            stamps_raw = listing.get("stamps", [])
+            stamps_raw = list(listing.get("stamps", []) or [])
+            if listing.get("publicationType") and listing["publicationType"] != "STANDARD":
+                stamps_raw.append(listing["publicationType"])  # PREMIUM / SUPER_PREMIUM = destaque pago
             stamps_str = "|".join(stamps_raw) if stamps_raw else None
 
             return {
                 "url": url,
-                "titulo": listing.get("title"),
+                # A busca não traz title/description (só o endpoint de detalhe);
+                # link.name ("Apartamento com 3 Quartos à venda, 71m²") cobre ~90%
+                "titulo": listing.get("title") or link.get("name"),
                 "descricao": listing.get("description"),
                 "tipo": self._map_tipo(unit_types[0]) if unit_types else None,
                 "finalidade": price_info.get("businessType", "SALE").replace("SALE", "venda").replace("RENTAL", "aluguel"),
@@ -467,13 +538,14 @@ class VivaRealScraper(BaseScraper):
                 "suites": int(listing.get("suites", [0])[0]) if listing.get("suites") else None,
                 "banheiros": int(listing.get("bathrooms", [0])[0]) if listing.get("bathrooms") else None,
                 "vagas": int(listing.get("parkingSpaces", [0])[0]) if listing.get("parkingSpaces") else None,
-                "rua": address.get("street"),
+                "rua": ", ".join(str(x) for x in (address.get("street"), address.get("streetNumber")) if x) or None,
                 "bairro": address.get("neighborhood"),
                 "cidade": address.get("city"),
                 "estado": address.get("stateAcronym"),
                 "cep": address.get("zipCode"),
-                "latitude": point.get("lat"),
-                "longitude": point.get("lon"),
+                # ~16% só têm a coordenada aproximada (localizacao_exata=False nesses)
+                "latitude": point.get("lat") or point.get("approximateLat"),
+                "longitude": point.get("lon") or point.get("approximateLon"),
                 "fotos_urls": fotos,
                 "image_count": image_count,
                 "data_publicacao": created,
@@ -483,12 +555,13 @@ class VivaRealScraper(BaseScraper):
                 "preco_por_m2": preco_por_m2,
                 "usage_types": "|".join(usage_types) if usage_types else None,
                 "property_sub_type": unit_types[0] if unit_types else None,
-                "andar": int(floors[0]) if floors else None,
-                "total_andares": int(unit_floor[0]) if unit_floor else None,
+                "andar": andar,
+                "total_andares": total_andares,
                 "aceita_permuta": str(listing.get("acceptExchange")) if listing.get("acceptExchange") is not None else None,
                 "status_anuncio": listing.get("status"),
                 "anunciante_nome": advertiser.get("name") or contact.get("name"),
-                "anunciante_telefone": str(contact.get("phones")) if contact.get("phones") else None,
+                "anunciante_telefone": "|".join(dict.fromkeys(
+                    str(p) for p in [*(contact.get("phones") or []), listing.get("whatsappNumber")] if p)) or None,
                 "listing_id": listing.get("id"),
                 "stamps": stamps_str,
                 "contract_type": price_info.get("businessType"),
@@ -498,8 +571,56 @@ class VivaRealScraper(BaseScraper):
                 "aluguel_total": float(aluguel_total) if aluguel_total else None,
                 "imovel_disponivel": True,
                 "imovel_atualizado": None,
+                # --- campos extras (mesmas colunas do Lugar Certo e Imovelweb) ---
+                "codigo_imovel_anunciante": listing.get("externalId") or None,
+                "anunciante_id": listing.get("advertiserId") or advertiser.get("id"),
+                "tipo_anunciante": None,  # a API não diferencia imobiliária de particular
+                "anunciante_creci": (advertiser.get("licenseNumber") or "").strip() or None,
+                "idade_imovel": None,
+                "lancamento": listing.get("listingType") == "DEVELOPMENT" or status_obra in self.STATUS_LANCAMENTO,
+                "estagio_obra": estagio,
+                "previsao_entrega": entrega,
+                "nome_empreendimento": listing.get("condominiumName") or None,
+                "localizacao_exata": address.get("precision") == "ROOFTOP" if address.get("precision") else None,
+                "baixou_preco_pct": None,
+                "tem_tour_virtual": "VIDEO_TOUR" in tipos_midia,
+                "tem_video": "VIDEO" in tipos_midia,
+                "tem_planta": "FLOOR_PLAN" in tipos_midia,
+                "unidades_por_andar": listing.get("unitsOnTheFloor") or None,
+                "elevadores": None,
+                # transporte_proximo, outros_portais, qualidade_anuncio e h3_index só vêm
+                # no detalhe (preenchidos em _enriquecer)
+                "transporte_proximo": None,
+                "outros_portais": None,
+                "anuncio_duplicado_id": None,
+                "aceita_financiamento": None,
+                "incorporadora": "|".join(d["name"] for d in listing.get("propertyDevelopers") or []
+                                          if d.get("name")) or None,
+                "qualidade_anuncio": None,
+                "anunciante_nivel": advertiser.get("tier") or None,
+                "anunciante_verificado": (advertiser.get("config") or {}).get("verified"),
+                "h3_index": None,
+                "localizacao_id": address.get("locationId"),
+                "descricao_ia": None,
+                "salas": None,
+                "tem_closet": None,
+                "formas_pagamento": None,
+                "anunciante_endereco": self._formatar_endereco((advertiser.get("addresses") or {}).get("billing")),
+                "anunciante_site": advertiser.get("websiteUrl") or None,
+                "pontos_interesse": None,  # só no detalhe (address.poisList)
+                "olx_id": None,            # só no detalhe (attributes.olx_id)
             }
-        except (KeyError, IndexError, TypeError, ValueError):
+        except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+            return None
+
+    @staticmethod
+    def _primeiro_int(valor) -> int | None:
+        """Aceita número ou lista (a API usa os dois formatos); 0 = não informado."""
+        if isinstance(valor, list):
+            valor = valor[0] if valor else None
+        try:
+            return int(valor) or None
+        except (TypeError, ValueError):
             return None
 
     def _map_tipo(self, unit_type: str) -> str | None:

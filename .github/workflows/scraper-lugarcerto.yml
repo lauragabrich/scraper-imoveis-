@@ -1,0 +1,50 @@
+name: Scraper Lugar Certo
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # continua de onde parou; estados concluídos são pulados
+  workflow_dispatch:
+    inputs:
+      reset:
+        description: 'Recomeçar do zero (--reset)'
+        type: boolean
+        default: false
+
+env:
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  RESET_FLAG: ${{ inputs.reset && '--reset' || '' }}
+
+jobs:
+  # MG tem ~55 mil dos ~75 mil anúncios do portal
+  mg:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    concurrency:
+      group: lugarcerto-mg
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Scrape MG
+        run: python main.py --portal lugarcerto --estado MG --workers 4 $RESET_FLAG
+
+  outros:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    concurrency:
+      group: lugarcerto-outros
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Scrape demais estados
+        run: python main.py --portal lugarcerto --estado GO,SP,RJ,ES,PE,DF,AM,PR,RS,CE,AL,BA,SC,MA,PB,MS,TO,RN,SE,PA,MT,AC,AP,PI,RO,RR --workers 4 $RESET_FLAG

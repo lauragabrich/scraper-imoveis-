@@ -2,6 +2,92 @@
 
 Scraper que coleta **todos os anúncios de imóveis** do VivaReal em todo o Brasil, salvando os dados em formato Parquet no Amazon S3.
 
+Também coleta **Lugar Certo** e **Imovelweb** (ver [Outros portais](#outros-portais-lugar-certo-e-imovelweb)), gravando no mesmo bucket e com as mesmas colunas.
+
+---
+
+## Recoleta do VivaReal (set/2026)
+
+**A API mudou depois da coleta de ago/2026** (medido em set/2026):
+
+| Limite atual da API | Efeito na coleta antiga (por bairro) |
+|---|---|
+| Máximo de ~1.500 anúncios por consulta (`from` acima de 1.464 é recusado) e 24 por página | bairro com mais de ~1.500 anúncios era cortado sem aviso |
+| Tipo de negócio vai em `business=SALE/RENTAL`; o antigo `businessType` é ignorado | aluguel nunca era coletado |
+| A busca não traz mais `title`/`description` | a coleta antiga tem os dois (vieram antes da mudança) |
+
+Volume real: **3,7 mi anúncios de venda + 0,87 mi de aluguel** no Brasil (SP: 2,2 mi + 0,57 mi). A coleta antiga tem ~2,3 mi anúncios únicos, só de venda.
+
+**Nova coleta, sem cidades nem bairros:** estado × negócio (venda/aluguel) × tipo (usado/lançamento) × faixa de preço (`priceMin`/`priceMax`), dividida ao meio até ≤ 1.400 anúncios; um preço único acima disso (ex.: ~6.500 a R$ 500.000 só na capital de SP) é dividido por área útil (`usableAreasMin/Max`). A ordem padrão da API é estável, então paginar dentro de uma fatia é seguro. Os filtros casam com *qualquer* preço/área do anúncio; para não duplicar, cada anúncio fica só na fatia do seu preço (e área) principal. Anúncios sem preço (~0,003%) ficam de fora.
+
+Outras correções em relação à coleta antiga:
+
+| Problema na coleta antiga | Efeito | Correção |
+|---|---|---|
+| `unitFloor` lido como lista | ~8% dos anúncios descartados sem aviso (todos com andar informado) | lido como número; aviso no log se algum anúncio for descartado |
+| `andar` e `total_andares` trocados | valores invertidos | corrigido |
+| Duplicatas entre lotes da mesma cidade | ~26% de linhas repetidas | cada anúncio pertence a uma única fatia |
+| Vídeos e plantas dentro de `fotos_urls` | contagem de fotos inflada | separados (`tem_video`, `tem_tour_virtual`, `tem_planta`) |
+| Telefone gravado como `"['3199...']"` | formato inutilizável | `3199...|3198...` |
+
+**Detalhe de cada anúncio (padrão; `--sem-detalhes` desliga):** `glue-api.vivareal.com/v2/listing/{id}` traz título, descrição, data de atualização, ano de entrega (`idade_imovel`), período do IPTU, amenities em português, transporte e pontos de interesse próximos, ID na OLX e em quais portais o anúncio também está. É 1 requisição por anúncio (~4,6 mi) e o Cloudflare do VivaReal bloqueia o IP por mais de 1h a ~10 req/s, então cada job usa `--workers 4` (~1,5 req/s).
+
+**Jobs:** SP em 6 partes (`--parte N/6`, ~460 mil anúncios cada) e os demais estados em 6 grupos de ~300 mil, cada job numa máquina (IP) diferente. Com o estado dividido, ~65 faixas fixas de preço são repartidas entre as partes e cada parte só consulta as suas. Progresso em `progress/vivareal/<UF>[_parteNdeM].json` (o `progress/<UF>.json` da coleta antiga não é mais lido nem alterado). Estimativa: ~3–4 dias.
+
+---
+
+## Outros portais: Lugar Certo e Imovelweb
+
+```bash
+python main.py --portal lugarcerto --all-estados              # ~75 mil anúncios
+python main.py --portal lugarcerto --estado MG --sem-detalhes # só listagem (rápido)
+python main.py --portal imovelweb --estado SP --workers 8 --passadas 2
+```
+
+| | Lugar Certo | Imovelweb |
+|---|---|---|
+| **Anúncios (set/2026)** | ~75 mil (55 mil em MG) | ~6 milhões (3,9 mi em SP) |
+| **Fonte** | Endpoint JSON da busca `/busca/dasearch` | API interna `POST /rplis-api/postings` |
+| **Proteção** | Nenhuma | Cloudflare: exige `curl_cffi` (fingerprint TLS do Chrome) |
+| **Limite por consulta** | 10.000 por chamada | 30 por página, máx. 1000 páginas (30 mil) |
+| **Segmentação** | estado → cidade → bairro (cidades > 10 mil) | estado × venda/aluguel × faixa de preço, dividida ao meio até ≤ 29 mil; se um preço único passa disso (ex.: ~35 mil anúncios a R$ 350.000 em SP), divide também por área útil |
+| **Cobertura medida** | 100% (DF), 99,97% (BH) | ~97% com 1 passada, ~100% com `--passadas 2` |
+| **Tempo estimado** | minutos (listagem) + ~15 h (detalhes, 4 workers) | SP: ~2 dias em 4 jobs (listagem + página de cada anúncio, 12 workers, 2 passadas); demais estados em paralelo, <1 dia cada |
+| **Workflow** | `scraper-lugarcerto.yml` | `scraper-imovelweb.yml` |
+
+**Detalhes técnicos que importam:**
+- **Lugar Certo:** a listagem não traz lat/lng, CEP, condomínio, IPTU, fotos, suítes nem telefone. Esses campos vêm da página de cada anúncio (`window.detalheanuncio`), o que é o passo demorado; `--sem-detalhes` pula esse passo. Não use `sort=menorpreco`: ele adiciona um filtro escondido que exclui anúncios sem preço. Em estados sem anúncios o filtro de estado é ignorado e a API devolve o Brasil inteiro, por isso os registros são validados por UF e cidade.
+- **Imovelweb:** as páginas HTML só abrem até a página 4 sem resolver o desafio do Cloudflare; a API JSON não tem essa restrição. A ordenação desempata de forma aleatória a cada requisição, e por isso uma passada paginada perde ~3%. A segunda passada (`--passadas 2`, ordenada por data) recupera quase tudo. Anúncios sem preço (~0,005%) não entram em nenhuma faixa. Um imóvel anunciado para venda e para aluguel aparece em duas linhas, uma por `finalidade`. A lista completa de características (imóvel → `amenities`, "Áreas comuns" → `complex_amenities`) e a data de publicação só existem na página de cada anúncio (objeto JS `avisoInfo`, sem API mais leve), baixada por padrão (`--sem-detalhes` desliga); o site aguentou ~9 páginas/s com 16 workers sem bloqueio. SP é dividido em 4 jobs (`--parte N/4`): cada segmento de preço/área pertence a uma parte, com progresso próprio (`progress/imovelweb/SP_parte2de4.json`).
+- **Colunas extras** (só nesses dois portais; nos arquivos do VivaReal ficam nulas no Athena):
+
+  | Coluna | Lugar Certo | Imovelweb | Uso |
+  |---|---|---|---|
+  | `codigo_imovel_anunciante` | 93% | 100% | Código interno da imobiliária: junto com `anunciante_id`, identifica o mesmo imóvel em portais diferentes |
+  | `anunciante_id` | 100% | 100% | ID do anunciante no portal |
+  | `tipo_anunciante` | 97% | 100% | imobiliaria / particular / incorporadora / construtora |
+  | `anunciante_creci` | — | ~35-60% | CRECI do anunciante |
+  | `idade_imovel` | — | ~25% | Anos desde a construção |
+  | `lancamento`, `estagio_obra`, `previsao_entrega` | só `lancamento` | 100% / ~10% / ~6% | Imóvel na planta / em obra e data de entrega |
+  | `nome_empreendimento` | ~15% | só empreendimentos | Nome do edifício/condomínio |
+  | `localizacao_exata` | 100% | ~90% | Se lat/lng é do endereço exato |
+  | `baixou_preco_pct` | — | ~2% | % de redução de preço |
+  | `tem_tour_virtual`, `tem_video`, `tem_planta` | só planta | 100% | Mídia disponível |
+  | `unidades_por_andar`, `elevadores` | ~27% | — | Dados do prédio |
+  | `transporte_proximo` | — | — | Metrô/trem a 1, 2 e 3 km (só VivaReal, pelo detalhe, ~29%) |
+  | `outros_portais` | — | — | Outros portais do grupo onde o anúncio está, ex. `OLX\|VIVAREAL\|ZAP` (só VivaReal) |
+  | `anuncio_duplicado_id` | — | ~8% | ID do anúncio que o próprio Imovelweb considera o original |
+  | `aceita_financiamento`, `formas_pagamento` | ~17% | — | À vista / financiamento / sinal + ágio |
+  | `incorporadora` | — | — | Incorporadora do lançamento (só VivaReal, ~12%) |
+  | `qualidade_anuncio`, `anunciante_nivel`, `anunciante_verificado` | — | — | Nota de qualidade, plano e selo do anunciante (só VivaReal) |
+  | `h3_index`, `localizacao_id` | — / — | — / 100% | Índice geográfico H3 (VivaReal) e ID interno de localização (VivaReal e Imovelweb) |
+  | `descricao_ia` | — | ~23% | Resumo gerado por IA pelo próprio portal |
+  | `salas`, `tem_closet` | ~40% / ~3% | — | Detalhes do imóvel |
+  | `anunciante_endereco`, `anunciante_site` | 100% / ~15% | — | Endereço e site da imobiliária (VivaReal: ~48% / ~49%) |
+  | `pontos_interesse` | — | — | Pontos de interesse próximos com prefixo de categoria do portal, ex. `BS:` = ponto de ônibus (só VivaReal, pelo detalhe) |
+  | `olx_id` | — | — | ID do mesmo anúncio na OLX, ex. `sale=1516661524` (só VivaReal, pelo detalhe) |
+
+- **Progresso:** fica em `progress/{portal}/{UF}.json`, com a lista de segmentos concluídos, separado do progresso do VivaReal. Cada segmento (cidade, bairro ou faixa de preço) vira um Parquet em `imoveis/portal={portal}/coleta={data}/estado={UF}/`.
+
 ---
 
 ## Arquitetura
@@ -23,7 +109,9 @@ GitHub Actions (compute gratuito) → API VivaReal → Amazon S3 (Parquet) → A
 
 ---
 
-## Como funciona o scraping
+## Como funciona o scraping (coleta antiga do VivaReal, ago/2026)
+
+> **Histórico.** Esta seção descreve a coleta por cidade/bairro que gerou os dados em `vivareal/estado=...`. A recoleta usa segmentação por faixa de preço — ver [Recoleta do VivaReal](#recoleta-do-vivareal-set2026).
 
 ### Fluxo de coleta
 
@@ -91,31 +179,125 @@ Isso garante que não importa a ordem em que a API retorna os bairros — o scra
 | Limite de ~10.000 resultados por busca | Bairros muito grandes podem perder anúncios | Busca por bairro individual reduz o problema |
 | Rate limiting da API (erro 429) | Pula bairro quando bloqueado | Espera 1-3s entre requests |
 | Timeout de 6h do GitHub Actions | Cidades grandes levam múltiplas execuções | Progresso por bairro + salvamento parcial |
-| Duplicatas possíveis entre execuções | Anúncios podem aparecer mais de uma vez | Filtrar com `SELECT DISTINCT url` no Athena |
+| Duplicatas possíveis entre execuções | Anúncios podem aparecer mais de uma vez | Corrigido na recoleta (deduplica por `listing_id` na cidade); na coleta antiga, filtrar com `SELECT DISTINCT url` |
 
 ---
 
 ## Estrutura dos dados no S3
 
+A partir da recoleta, **cada coleta completa grava numa pasta própria**, então recoletar não sobrescreve a anterior (e dá para comparar coletas para saber o que saiu do ar e o que mudou de preço):
+
 ```
 s3://scraper-imoveis-data/
-├── vivareal/
-│   ├── estado=SP/
-│   │   ├── adamantina.parquet
-│   │   ├── sao-paulo.parquet
-│   │   ├── sao-paulo_part500.parquet    (salvamento parcial)
-│   │   └── campinas.parquet
-│   ├── estado=RJ/
-│   │   ├── rio-de-janeiro.parquet
-│   │   └── niteroi.parquet
-│   └── ...
+├── imoveis/
+│   ├── portal=vivareal/coleta=2026-10-01/estado=SP/sao-paulo.parquet
+│   ├── portal=lugarcerto/coleta=2026-10-01/estado=MG/belo-horizonte_lourdes.parquet
+│   └── portal=imovelweb/coleta=2026-10-01/estado=SP/venda_500000-620000.parquet
+├── vivareal/estado=SP/...        ← coleta antiga (layout anterior, mantida como arquivo)
 └── progress/
-    ├── SP.json
-    ├── RJ.json
-    └── ...
+    ├── SP.json                   ← progresso do VivaReal
+    ├── vivareal/_coleta.json     ← data da coleta em andamento de cada portal
+    ├── lugarcerto/MG.json
+    └── imovelweb/SP.json
 ```
 
-Particionado por estado → cidade. O Athena consegue escanear apenas o estado desejado, economizando custo.
+- **Nova coleta:** rode com `--reset` (ou marque "reset" ao disparar o workflow). Isso zera o progresso dos estados pedidos e abre a pasta `coleta=<data de hoje>`. Todos os `--reset` dentro de 24h caem na mesma coleta (jobs paralelos, estados em sequência).
+- **Continuar uma coleta:** rode sem `--reset`; ela continua gravando na mesma pasta até terminar.
+
+### Tabela no Athena (os 3 portais juntos)
+
+```sql
+CREATE EXTERNAL TABLE imoveis.anuncios (
+  `url` string,
+  `titulo` string,
+  `descricao` string,
+  `tipo` string,
+  `finalidade` string,
+  `preco` double,
+  `preco_condominio` double,
+  `iptu` double,
+  `area_construida` double,
+  `area_terreno` double,
+  `quartos` bigint,
+  `suites` bigint,
+  `banheiros` bigint,
+  `vagas` bigint,
+  `rua` string,
+  `bairro` string,
+  `cidade` string,
+  `cep` string,
+  `latitude` double,
+  `longitude` double,
+  `fotos_urls` string,
+  `image_count` bigint,
+  `data_publicacao` string,
+  `data_ultima_atualizacao` string,
+  `amenities` string,
+  `complex_amenities` string,
+  `preco_por_m2` double,
+  `usage_types` string,
+  `property_sub_type` string,
+  `andar` bigint,
+  `total_andares` bigint,
+  `aceita_permuta` string,
+  `status_anuncio` string,
+  `anunciante_nome` string,
+  `anunciante_telefone` string,
+  `listing_id` string,
+  `stamps` string,
+  `contract_type` string,
+  `zona` string,
+  `periodo_iptu` string,
+  `garantias_aluguel` string,
+  `aluguel_total` double,
+  `imovel_disponivel` boolean,
+  `imovel_atualizado` string,
+  `codigo_imovel_anunciante` string,
+  `anunciante_id` string,
+  `tipo_anunciante` string,
+  `anunciante_creci` string,
+  `idade_imovel` bigint,
+  `lancamento` boolean,
+  `estagio_obra` string,
+  `previsao_entrega` string,
+  `nome_empreendimento` string,
+  `localizacao_exata` boolean,
+  `baixou_preco_pct` double,
+  `tem_tour_virtual` boolean,
+  `tem_video` boolean,
+  `tem_planta` boolean,
+  `unidades_por_andar` bigint,
+  `elevadores` bigint,
+  `transporte_proximo` string,
+  `outros_portais` string,
+  `anuncio_duplicado_id` string,
+  `aceita_financiamento` boolean,
+  `incorporadora` string,
+  `qualidade_anuncio` double,
+  `anunciante_nivel` string,
+  `anunciante_verificado` boolean,
+  `h3_index` string,
+  `localizacao_id` string,
+  `descricao_ia` string,
+  `salas` bigint,
+  `tem_closet` boolean,
+  `formas_pagamento` string,
+  `anunciante_endereco` string,
+  `anunciante_site` string,
+  `pontos_interesse` string,
+  `olx_id` string,
+  `data_coleta` string
+)
+PARTITIONED BY (portal string, coleta string, estado string)
+STORED AS PARQUET
+LOCATION 's3://scraper-imoveis-data/imoveis/';
+
+-- depois de cada coleta (registra as pastas novas):
+MSCK REPAIR TABLE imoveis.anuncios;
+```
+
+Exemplo: `SELECT portal, COUNT(*) FROM imoveis.anuncios WHERE coleta = '2026-10-01' GROUP BY portal`.
+A tabela antiga `vivareal` (usada pelo `athena_client.py`) continua apontando para os dados antigos.
 
 ---
 
@@ -269,10 +451,12 @@ ORDER BY total DESC
 ### Localmente
 ```bash
 pip install -r requirements.txt
-python main.py --estado SP              # Um estado
-python main.py --all-estados            # Todos os estados
-python main.py --estado SP --limit 100  # Com limite
-python main.py --all-estados --reset    # Resetar progresso
+python main.py --estado SP                          # VivaReal, um estado
+python main.py --estado SP --parte 2/6              # VivaReal, 2ª de 6 partes do estado
+python main.py --all-estados --reset                # nova coleta do zero (pasta coleta=<data> nova)
+python main.py --estado MG --cidade "Belo Horizonte" --sem-detalhes   # teste rápido
+python main.py --portal lugarcerto --all-estados
+python main.py --portal imovelweb --estado RJ --workers 12 --passadas 2
 ```
 
 Requer variáveis de ambiente (ver `.env.example`):
@@ -284,9 +468,9 @@ AWS_REGION=us-east-2
 ```
 
 ### Via GitHub Actions (automático)
-- Roda automaticamente a cada 6 horas
-- Pode ser disparado manualmente em Actions → "Run workflow"
-- Suporta parâmetros: estado específico ou ALL, limite de anúncios
+- Três workflows (`scraper.yml` = VivaReal, `scraper-lugarcerto.yml`, `scraper-imovelweb.yml`), cada um rodando a cada 6 horas e continuando de onde parou; estados concluídos são pulados
+- Para uma **nova coleta**, dispare manualmente em Actions → "Run workflow" com **reset** marcado
+- Juntos somam ~23 jobs; o plano gratuito roda 20 ao mesmo tempo e o resto espera na fila
 
 ---
 
