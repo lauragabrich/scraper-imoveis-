@@ -14,7 +14,7 @@ Uso:
 import argparse
 import sys
 
-PORTAIS = ["vivareal", "lugarcerto", "imovelweb"]
+PORTAIS = ["vivareal", "lugarcerto", "imovelweb", "chavesnamao"]
 
 
 def parse_parte(texto: str) -> tuple[int, int]:
@@ -37,6 +37,9 @@ def criar_scraper(args):
     if args.portal == "lugarcerto":
         from scrapers.lugarcerto import LugarCertoScraper
         return LugarCertoScraper(detalhes=detalhes, workers=args.workers)
+    if args.portal == "chavesnamao":
+        from scrapers.chavesnamao import ChavesNaMaoScraper
+        return ChavesNaMaoScraper(workers=args.workers, detalhes=detalhes, parte=parte, partes=partes)
     from scrapers.imovelweb import ImovelwebScraper
     return ImovelwebScraper(workers=args.workers, passadas=args.passadas,
                             detalhes=detalhes, parte=parte, partes=partes, complementar=args.complementar)

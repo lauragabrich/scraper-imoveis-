@@ -2,7 +2,7 @@
 
 Scraper que coleta **todos os anúncios de imóveis** do VivaReal em todo o Brasil, salvando os dados em formato Parquet no Amazon S3.
 
-Também coleta **Lugar Certo** e **Imovelweb** (ver [Outros portais](#outros-portais-lugar-certo-e-imovelweb)), gravando no mesmo bucket e com as mesmas colunas.
+Também coleta **Lugar Certo**, **Imovelweb** (ver [Outros portais](#outros-portais-lugar-certo-e-imovelweb)) e **Chaves na Mão** (ver [Chaves na Mão](#chaves-na-mão-out2026)), gravando no mesmo bucket e com as mesmas colunas.
 
 ---
 
@@ -87,6 +87,22 @@ python main.py --portal imovelweb --estado SP --workers 12 --passadas 2   # no s
   | `olx_id` | — | — | ID do mesmo anúncio na OLX, ex. `sale=1516661524` (só VivaReal, pelo detalhe) |
 
 - **Progresso:** fica em `progress/{portal}/{UF}.json`, com a lista de segmentos concluídos, separado do progresso do VivaReal. Cada segmento (cidade, bairro ou faixa de preço) vira um Parquet em `imoveis/portal={portal}/coleta={data}/estado={UF}/`.
+
+## Chaves na Mão (out/2026)
+
+```bash
+python main.py --portal chavesnamao --estado RJ --workers 4
+python main.py --portal chavesnamao --estado SP --parte 2/6 --sem-detalhes   # só a busca (rápido)
+```
+
+- **Anúncios:** ~4,64 milhões (4,02 mi venda + 0,62 mi aluguel), dos quais 2,95 mi em SP.
+- **Fonte:** API interna do site (Next.js) `GET /api/realestate/listing/items/?level1=imoveis-a-venda&level2=sp&filtro=pmin:X,pmax:Y&pg=N`. Ela devolve JSON e não exige `curl_cffi`.
+- **Limites:** 15 anúncios por página. A numeração começa em `pg=0`, que é a 1ª página do site. O Cloudflare bloqueia (403) de `pg=100` em diante, então cada consulta entrega no máximo 1.500 anúncios. A segmentação é estado × venda/aluguel × preço, dividido até ≤ 1.400. Um preço único grande demais (57% dos anúncios de venda de SP estão em preços "redondos" com mais de 1.400 anúncios, ex.: 36 mil a R$ 450.000) é dividido pelo tipo de imóvel (`navigationFilters` dá a página e a contagem de cada tipo) e, se ainda passar, pela área útil.
+- **"Imóveis similares":** depois dos resultados reais, a API emenda anúncios fora do filtro, sinalizados por um item `{"recommendedCount": ...}`. O coletor para nesse item e só aceita anúncios dentro da faixa.
+- **Cobertura medida:** 100% de cada faixa com uma ordenação (687/687); ES inteiro 13.788 de 13.806 (99,9%); R$ 450.000 em SP 98,8%. Ficam fora os anúncios sem preço (~0,2%, que não entram em nenhum filtro de preço) e, nos preços muito repetidos de apartamento/casa, os anúncios sem área nenhuma (o filtro de área os exclui e toda ordenação os põe depois do limite de 1.500).
+- **Ritmo:** ~1,6 anúncio/s por job com a página do anúncio (4 workers). SP (2,95 mi em 6 jobs) leva ~3,5 dias; os demais jobs terminam antes.
+- **Busca × página do anúncio:** a busca já traz preço, condomínio e IPTU (quando informados), áreas, cômodos, endereço com número, CEP, coordenada, descrição, datas, anunciante (nome, CRECI, telefones, endereço) e pontos próximos (`pontos_interesse`, `transporte_proximo`). A página do anúncio (payload RSC, ~500 KB) só acrescenta a lista de características (`amenities` e `complex_amenities`, presentes em ~40% dos anúncios) e o condomínio quando a busca não traz. `--sem-detalhes` pula essa página.
+- **Onde roda:** GitHub Actions (`scraper-chavesnamao.yml`), em 12 jobs: SP em 6 partes, mais RS, SC, RJ, PR, MG e um job com os demais estados.
 
 ---
 
@@ -477,10 +493,10 @@ Set-ExecutionPolicy -Scope Process Bypass   # só se o Windows bloquear o script
 O script coleta todos os estados e repete sozinho até terminar. Pode fechar a janela ou reiniciar o computador: ao rodar de novo, continua de onde parou (progresso em `progress/imovelweb/` no S3). Deixe o Windows sem suspender enquanto roda (Configurações → Sistema → Energia → "Suspender: Nunca"). Ele troca de identidade de navegador sozinho quando o Cloudflare responde 403.
 
 ### Via GitHub Actions (automático)
-- Dois workflows (`scraper.yml` = VivaReal, `scraper-lugarcerto.yml`), cada um rodando a cada 6 horas e continuando de onde parou; estados concluídos são pulados
+- Três workflows (`scraper.yml` = VivaReal, `scraper-lugarcerto.yml` e `scraper-chavesnamao.yml`), agendados de hora em hora e continuando de onde pararam; estados concluídos são pulados
 - O **Imovelweb não roda no GitHub**: o Cloudflare dele bloqueia os IPs de datacenter (testado com 12 identidades de navegador pelo workflow manual `diagnostico-imovelweb.yml`, todas com 403). Ele roda no seu computador — ver abaixo
 - Para uma **nova coleta**, dispare manualmente em Actions → "Run workflow" com **reset** marcado
-- Juntos somam ~23 jobs; o plano gratuito roda 20 ao mesmo tempo e o resto espera na fila
+- Juntos somam ~26 jobs; o plano gratuito roda 20 ao mesmo tempo e o resto espera na fila
 
 ---
 
