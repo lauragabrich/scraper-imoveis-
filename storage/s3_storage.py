@@ -99,7 +99,9 @@ class S3Storage:
 
             for col in float_cols:
                 if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
+                    # astype: se todos os valores do arquivo forem inteiros (ex.: nota 70) o
+                    # to_numeric daria int64, que o Athena recusa numa coluna double
+                    df[col] = pd.to_numeric(df[col], errors="coerce").astype("float64")
 
             for col in int_cols:
                 if col in df.columns:
