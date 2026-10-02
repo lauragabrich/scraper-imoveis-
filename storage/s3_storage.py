@@ -25,6 +25,15 @@ def corrigir_coordenadas(df: pd.DataFrame) -> int:
     return int(trocar.sum())
 
 
+def _id_texto(v):
+    """123 / 123.0 / "123" -> "123" (com nulos no meio o pandas vira float)."""
+    if v is None or v is pd.NA or v != v:
+        return None
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    return str(v)
+
+
 class S3Storage:
     """Gerencia upload de dados para o S3 em formato Parquet."""
 
@@ -101,6 +110,12 @@ class S3Storage:
                     df[col] = df[col].astype("boolean")
 
             corrigir_coordenadas(df)
+
+            # IDs são texto na tabela do Athena; o Chaves na Mão os manda como número, e um
+            # int64 nessas colunas faz o Athena recusar qualquer consulta que leia o arquivo
+            for col in ("listing_id", "anunciante_id"):
+                if col in df.columns:
+                    df[col] = df[col].map(_id_texto).astype(object)
 
             # Demais colunas: sempre string. Evita (1) coluna toda nula gravada com tipo
             # "null" e (2) valores mistos (ex.: código 439851 numérico num anúncio e
