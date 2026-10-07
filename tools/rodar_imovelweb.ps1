@@ -24,7 +24,7 @@ if (-not (Test-Path ".env")) {
 for ($rodada = 1; $rodada -le 50; $rodada++) {
     Write-Host ""
     Write-Host "=== Imovelweb - rodada $rodada - $(Get-Date -Format 'dd/MM HH:mm') ==="
-    python main.py --portal imovelweb --all-estados --workers 12 --passadas 2
+    python main.py --portal imovelweb --all-estados --workers 16 --passadas 2
     if ($LASTEXITCODE -eq 0) {
         Write-Host "Imovelweb concluido em todos os estados."
         break
