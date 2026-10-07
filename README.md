@@ -57,7 +57,7 @@ python main.py --portal imovelweb --estado SP --workers 12 --passadas 2   # no s
 
 **Detalhes técnicos que importam:**
 - **Lugar Certo:** a listagem não traz lat/lng, CEP, condomínio, IPTU, fotos, suítes nem telefone. Esses campos vêm da página de cada anúncio (`window.detalheanuncio`), o que é o passo demorado; `--sem-detalhes` pula esse passo. Não use `sort=menorpreco`: ele adiciona um filtro escondido que exclui anúncios sem preço. Em estados sem anúncios o filtro de estado é ignorado e a API devolve o Brasil inteiro, por isso os registros são validados por UF e cidade.
-- **Imovelweb:** as páginas HTML só abrem até a página 4 sem resolver o desafio do Cloudflare; a API JSON não tem essa restrição. A ordenação desempata de forma aleatória a cada requisição, e por isso uma passada paginada perde ~3%. A segunda passada (`--passadas 2`, ordenada por data) recupera quase tudo. Anúncios sem preço (~0,005%) não entram em nenhuma faixa. Um imóvel anunciado para venda e para aluguel aparece em duas linhas, uma por `finalidade`. A lista completa de características (imóvel → `amenities`, "Áreas comuns" → `complex_amenities`) e a data de publicação só existem na página de cada anúncio (objeto JS `avisoInfo`, sem API mais leve), baixada por padrão (`--sem-detalhes` desliga); o site aguentou ~9 páginas/s com 16 workers sem bloqueio. SP é dividido em 4 jobs (`--parte N/4`): cada segmento de preço/área pertence a uma parte, com progresso próprio (`progress/imovelweb/SP_parte2de4.json`).
+- **Imovelweb:** as páginas HTML só abrem até a página 4 sem resolver o desafio do Cloudflare; a API JSON não tem essa restrição. A ordenação desempata de forma aleatória a cada requisição, e por isso uma passada paginada perde ~3%. A segunda passada (`--passadas 2`, ordenada por data) recupera quase tudo. Anúncios sem preço (~0,005%) não entram em nenhuma faixa. Um imóvel anunciado para venda e para aluguel aparece em duas linhas, uma por `finalidade`. A lista completa de características (imóvel → `amenities`, "Áreas comuns" → `complex_amenities`) e a data de publicação só existem na página de cada anúncio (objeto JS `avisoInfo`, sem API mais leve), baixada por padrão (`--sem-detalhes` desliga); num teste curto (112 páginas em ~13 s) o site respondeu 8,9 páginas/s com 16 workers sem bloqueio, mas isso não prova que aguente 16 por dias; a coleta real usa 12 workers (~5 anúncios/s, sem bloqueio em 7 dias seguidos). SP é dividido em 4 jobs (`--parte N/4`): cada segmento de preço/área pertence a uma parte, com progresso próprio (`progress/imovelweb/SP_parte2de4.json`).
 - **Colunas extras** (só nesses dois portais; nos arquivos do VivaReal ficam nulas no Athena):
 
   | Coluna | Lugar Certo | Imovelweb | Uso |
@@ -488,7 +488,8 @@ AWS_REGION=us-east-2
 No PowerShell, dentro da pasta `scraper-imoveis` (precisa do `.env` com as credenciais da AWS):
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass   # só se o Windows bloquear o script
-.	oolsodar_imovelweb.ps1
+.	ools
+odar_imovelweb.ps1
 ```
 O script coleta todos os estados e repete sozinho até terminar. Pode fechar a janela ou reiniciar o computador: ao rodar de novo, continua de onde parou (progresso em `progress/imovelweb/` no S3). Deixe o Windows sem suspender enquanto roda (Configurações → Sistema → Energia → "Suspender: Nunca"). Ele troca de identidade de navegador sozinho quando o Cloudflare responde 403.
 
